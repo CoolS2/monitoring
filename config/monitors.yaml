@@ -1,0 +1,25 @@
+telegram:
+  token: "YOUR_BOT_TOKEN"
+  chat_id: "YOUR_CHAT_ID"
+
+checks:
+
+  website:
+    type: http
+    url: "https://example.com"
+    interval: 60
+    expect_status: 200
+
+  api:
+    type: http
+    url: "https://example.com/api/health"
+    interval: 60
+    expect_body_contains: "ok"
+
+  nginx_errors:
+    type: ssh_log
+    host: "YOUR_VPS_IP"
+    user: "root"
+    file: "/var/log/nginx/error.log"
+    grep: "error"
+    interval: 300
