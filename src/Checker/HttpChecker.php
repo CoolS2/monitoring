@@ -1,35 +1,80 @@
+<?php
+
 namespace App\Checker;
 
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 
-class HttpChecker
+class HttpChecker implements CheckerInterface
 {
     public function __construct(private HttpClientInterface $client) {}
 
-    public function check(array $cfg): array
+    public function supports(string $type): bool
     {
+        return in_array($type, ['http', 'https'], true);
+    }
+
+    public function check(array $config): CheckOutcome
+    {
+        $url = $config['url'] ?? '';
+        if (empty($url)) {
+            return new CheckOutcome(false, 'Missing target URL');
+        }
+
+        $startTime = microtime(true);
+
         try {
-            $res = $this->client->request('GET', $cfg['url'], [
-                'timeout' => 5
+            // We set timeout and redirects limit according to config or defaults
+            $response = $this->client->request('GET', $url, [
+                'timeout' => $config['timeout'] ?? 10,
+                'max_redirects' => $config['max_redirects'] ?? 5,
             ]);
 
-            $code = $res->getStatusCode();
+            // Force request execution by retrieving status code
+            $statusCode = $response->getStatusCode();
+            $body = $response->getContent(false);
+            $responseTime = round(microtime(true) - $startTime, 3);
 
-            if (isset($cfg['expect_status']) && $code !== $cfg['expect_status']) {
-                return [false, "HTTP $code"];
+            // Verify expected HTTP status code (defaults to 200)
+            $expectedStatus = $config['expect_status'] ?? 200;
+            if ($statusCode !== $expectedStatus) {
+                return new CheckOutcome(
+                    false,
+                    sprintf('HTTP status code %d (expected %d)', $statusCode, $expectedStatus),
+                    $responseTime,
+                    ['status_code' => $statusCode, 'body_preview' => mb_substr($body, 0, 500)]
+                );
             }
 
-            $body = $res->getContent(false);
-
-            if (isset($cfg['expect_body_contains']) &&
-                !str_contains($body, $cfg['expect_body_contains'])) {
-                return [false, "Body mismatch"];
+            // Verify body contents if requested
+            if (isset($config['expect_body_contains']) && !str_empty($config['expect_body_contains'])) {
+                $needle = $config['expect_body_contains'];
+                if (!str_contains($body, $needle)) {
+                    return new CheckOutcome(
+                        false,
+                        sprintf('Body does not contain: "%s"', $needle),
+                        $responseTime,
+                        ['status_code' => $statusCode, 'body_preview' => mb_substr($body, 0, 500)]
+                    );
+                }
             }
 
-            return [true, "OK"];
+            return new CheckOutcome(true, 'OK', $responseTime, ['status_code' => $statusCode]);
 
         } catch (\Throwable $e) {
-            return [false, $e->getMessage()];
+            $responseTime = round(microtime(true) - $startTime, 3);
+            return new CheckOutcome(
+                false,
+                sprintf('Connection failed: %s', $e->getMessage()),
+                $responseTime
+            );
         }
+    }
+}
+
+// Helper to check for empty strings
+if (!function_exists('App\Checker\str_empty')) {
+    function str_empty(?string $str): bool
+    {
+        return $str === null || trim($str) === '';
     }
 }

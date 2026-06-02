@@ -1,0 +1,25 @@
+monolog:
+    channels: ['monitor', 'llm']
+    handlers:
+        main:
+            type: rotating_file
+            path: "%kernel.logs_dir%/application.log"
+            level: debug
+            max_files: 7
+            channels: ["!monitor", "!llm"]
+        monitor:
+            type: rotating_file
+            path: "%kernel.logs_dir%/monitor.log"
+            level: info
+            max_files: 7
+            channels: ["monitor"]
+        llm:
+            type: rotating_file
+            path: "%kernel.logs_dir%/llm.log"
+            level: info
+            max_files: 7
+            channels: ["llm"]
+        console:
+            type: console
+            process_psr_3_messages: false
+            channels: ["!event", "!doctrine"]

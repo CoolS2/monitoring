@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    container_name: monitoring_app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./var:/app/var
+      - ./config/monitors.yaml:/app/config/monitors.yaml:ro
+      - ./.env:/app/.env
+      - ${SSH_PRIVATE_KEY_PATH:-/root/.ssh/id_rsa}:/root/.ssh/id_rsa:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

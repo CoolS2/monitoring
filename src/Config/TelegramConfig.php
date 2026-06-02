@@ -1,3 +1,7 @@
+<?php
+
+namespace App\Config;
+
 final class TelegramConfig
 {
     public function __construct(
