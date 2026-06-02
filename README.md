@@ -1,78 +1,78 @@
 # 🚀 AI-Powered Monitoring Service
 
-Легковесный, расширяемый и готовый к продакшену сервис мониторинга сайтов, серверов и Docker-контейнеров с автоматическим анализом инцидентов локальной LLM (OpenAI-совместимой) и отправкой уведомлений в Telegram.
+A lightweight, extensible, production-ready monitoring service for websites, servers, and Docker containers, featuring automatic anomaly diagnostics using a local (OpenAI-compatible) LLM and instant alerts sent to Telegram.
 
-Построен на стеке **Symfony 8.1+**, **PHP 8.5+**, **Doctrine ORM (SQLite)** и **Docker**. Предназначен для развёртывания на домашнем сервере (Self-Hosted).
-
----
-
-## 🔥 Ключевые возможности
-
-1. **Модульная архитектура**: Легко добавлять новые типы проверок через интерфейс `CheckerInterface`.
-2. **Поддерживаемые проверки**:
-   - **HTTP/HTTPS**: Проверка статус-кода, времени ответа (latency), редиректов и наличия подстроки в теле ответа.
-   - **SSL-сертификаты**: Нативная проверка сроков действия сертификатов без вызова CLI-утилит (предупреждение за N дней).
-   - **SSH Log Checker**: Подключение по SSH-ключу к удалённым серверам, сбор последних N строк логов и поиск ошибок по регулярным выражениям.
-   - **Docker Checker**: Удалённый мониторинг контейнеров по SSH: отслеживание состояния (running/exited), детекция unhealthy контейнеров и критического числа перезапусков.
-3. **Интеграция с локальной LLM**:
-   - Поддержка любых OpenAI-совместимых API (Ollama, LocalAI, OpenWebUI, LM Studio).
-   - Автоматический разбор контекста ошибок и логов нейросетью.
-   - Выдача отчёта: краткое описание, вероятная причина, уровень критичности (LOW, MEDIUM, HIGH, CRITICAL) и рекомендации по исправлению.
-   - **Fail-safe устойчивость**: Если LLM недоступна, оповещение в Telegram всё равно будет отправлено в стандартном виде.
-4. **Антиспам (Дедупликация)**: Настраиваемый cooldown период. Если сервис лежит, уведомление присылается сразу, а повторные — не чаще одного раза в N минут. При восстановлении сервиса мгновенно приходит recovery-оповещение.
-5. **Ежедневный отчёт (Daily Summary)**: Раз в день компилирует общую статистику (всего проверок, процент аптайма, список проблемных хостов) и шлёт сводку в Telegram.
-6. **REST API Dashboard**: Готовые JSON-эндпоинты для вывода статистики на фронтенд.
+Built with **Symfony 8.1+**, **PHP 8.5+**, **Doctrine ORM (SQLite)**, and **Docker**. Designed for self-hosted home server deployments.
 
 ---
 
-## 🛠 Быстрый запуск (Docker Ready)
+## 🔥 Key Features
 
-Для развёртывания сервиса на вашем сервере достаточно иметь установленные Docker и Docker Compose.
+1. **Modular Architecture**: Add new checkers easily by implementing the `CheckerInterface`.
+2. **Supported Checkers**:
+   - **HTTP/HTTPS**: Verifies status codes, response latency, redirect counts, and body content matching (`expect_body_contains`).
+   - **SSL Certificates**: Native SSL certificate expiration checking using PHP stream sockets (triggers warnings N days before expiration).
+   - **SSH Log Checker**: Connects via SSH key to remote host logs, retrieves the last N lines, and parses them using grep/regex error patterns.
+   - **Docker Checker**: Agentless remote container monitoring via SSH: tracks container states (running/exited), unhealthy statuses, and high restart counts.
+3. **Local LLM Integration**:
+   - Supports any OpenAI-compatible API runtime (Ollama, LocalAI, OpenWebUI, LM Studio).
+   - Automatically analyzes error contexts and log lines with an LLM.
+   - Returns a structured diagnostic summary: description, probable root cause, severity classification (LOW, MEDIUM, HIGH, CRITICAL), and recommended actions.
+   - **Fail-safe Resilience**: If the LLM goes offline, standard alerts are still delivered to Telegram immediately.
+4. **Anti-Spam Deduplication**: Configurable cooldown period. If a service goes down, an alert is sent instantly; repeated alerts are throttled to once every N minutes. On recovery, a recovery notification is sent immediately.
+5. **Daily Summaries**: Compiles daily checking metrics (total runs, uptime percentage, and a list of failed hosts) and posts a report to Telegram.
+6. **REST API Dashboard**: Ready-to-use JSON endpoints suitable for a Nuxt/Vue dashboard frontend.
 
-### 1. Подготовка конфигурации
+---
 
-Создайте рабочую директорию на сервере и подготовьте файлы:
+## 🛠 Quick Start (Docker Ready)
 
-#### Файл `.env`
-Настройте секреты и параметры окружения:
+To deploy the service on your production server, all you need is Docker and Docker Compose.
+
+### 1. Prepare Configuration
+
+Create a working directory on your server and set up the following configuration files:
+
+#### File `.env`
+Configure secrets and environment variables:
 ```env
 TELEGRAM_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
 
-# Настройки LLM (например, Ollama на хосте)
+# LLM Configuration (e.g. Ollama running on host)
 LLM_ENDPOINT=http://host.docker.internal:11434/v1
 LLM_MODEL=llama3
 
-# Настройки SSH для удалённого мониторинга хостов
+# SSH Credentials for remote monitoring
 SSH_PRIVATE_KEY_PATH=/root/.ssh/id_rsa
 SSH_TIMEOUT=10
 
-# База данных SQLite (внутри контейнера)
+# Database URL for SQLite (mapped inside container)
 DATABASE_URL=sqlite:////app/var/data.db
 
-# Интервал антиспама для повторных алертов в минутах
+# Notification cooldown time in minutes
 NOTIFICATION_COOLDOWN=60
 ```
 
-#### Файл `config/monitors.yaml`
-Опишите ваши проверки:
+#### File `config/monitors.yaml`
+Describe the checks you want to run:
 ```yaml
 checks:
-  # Проверка сайта
+  # HTTP website check
   my_site:
     type: http
     url: https://example.com
     interval: 60
     expect_status: 200
 
-  # Проверка API с поиском текста
+  # API check with response content validation
   my_api:
     type: http
     url: https://example.com/api/health
     interval: 60
     expect_body_contains: "ok"
 
-  # Мониторинг логов Nginx на удалённой VPS
+  # Nginx log error checking on remote host
   nginx_errors:
     type: ssh_log
     host: 192.168.1.50
@@ -82,14 +82,14 @@ checks:
     grep: "error|crit"
     interval: 300
 
-  # Мониторинг срока действия SSL-сертификата
+  # SSL certificate expiration check
   my_ssl_check:
     type: ssl
     host: example.com
     warning_days: 14
-    interval: 86400 # раз в сутки
+    interval: 86400 # run once a day
 
-  # Мониторинг Docker-контейнеров на удалённом сервере
+  # Remote Docker container health check
   docker_check:
     type: docker
     host: 192.168.1.50
@@ -98,66 +98,66 @@ checks:
     interval: 120
 ```
 
-### 2. Запуск
+### 2. Deployment
 
-Создайте файл `docker-compose.yml`, указывающий на этот GitHub-репозиторий:
+Create a `docker-compose.yml` file pointing directly to this GitHub repository:
 
 ```yaml
 services:
   app:
-    build: https://github.com/ВАШ_USERNAME/ВАШ_РЕПОЗИТОРИЙ.git#main
+    # Build directly from the GitHub repository and branch
+    build: https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git#main
     container_name: monitoring_app
     ports:
       - "8000:8000"
     volumes:
-      - ./var:/app/var
-      - ./config/monitors.yaml:/app/config/monitors.yaml:ro
-      - ./.env:/app/.env
-      - ${SSH_PRIVATE_KEY_PATH:-/root/.ssh/id_rsa}:/root/.ssh/id_rsa:ro
+      - ./var:/app/var                                                  # SQLite database & rotating logs
+      - ./config/monitors.yaml:/app/config/monitors.yaml:ro            # Read-only checks config
+      - ./.env:/app/.env                                                # Environment secrets
+      - ${SSH_PRIVATE_KEY_PATH:-/root/.ssh/id_rsa}:/root/.ssh/id_rsa:ro # Read-only SSH private key
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:host-gateway"                             # Allows connecting to host-bound LLM
     restart: unless-stopped
 ```
 
-Запустите контейнер:
+Start the containerized service:
 ```bash
 docker compose up -d
 ```
 
-На старте контейнер автоматически:
-1. Выполнит миграции SQLite базы данных.
-2. Запустит фоновый планировщик `crond`, который будет выполнять проверки каждую минуту.
-3. Запустит веб-сервер REST API на порту `8000`.
+Upon boot, the container automatically:
+1. Runs database migrations (`doctrine:migrations:migrate`) to create SQLite tables.
+2. Initializes the background `crond` daemon to run due checks every minute.
+3. Exposes the Dashboard REST API on port `8000`.
 
 ---
 
-## 📡 REST API Эндпоинты
+## 📡 REST API Endpoints
 
-Все ответы отдаются в формате JSON:
+All endpoints return JSON responses:
 
-* **`GET /api/checks`** — Список всех проверок из конфигурации, их текущий статус здоровья, время отклика последнего запуска и метаданные.
-* **`GET /api/checks/{key}`** — Детальная история (последние 50 запусков), активные аварии и привязанный к ним LLM-анализ для конкретной проверки.
-* **`GET /api/errors`** — История инцидентов (активные аварии и последние 50 решённых проблем).
-* **`GET /api/alerts`** — Список последних 100 отправленных уведомлений в Telegram.
-* **`GET /api/stats`** — Сводная статистика за последние 24 часа (процент аптайма, общее число запусков/падений, среднее время отклика).
-
----
-
-## 📝 Логирование и Ротация
-
-Логи разделены по каналам с помощью Monolog и автоматически ротируются каждые 7 дней для экономии диска.
-Они сохраняются в примонтированную директорию `var/log/`:
-
-* `var/log/application.log` — Общие логи работы Symfony-приложения.
-* `var/log/monitor.log` — Логи работы планировщика и результатов проверок.
-* `var/log/llm.log` — Логи запросов к LLM и сырых ответов нейросети.
+* **`GET /api/checks`** — Returns all configured checks, their live health status, response latencies, and metadata.
+* **`GET /api/checks/{key}`** — Detailed execution log (last 50 runs), active incidents, and linked LLM diagnostics for a check.
+* **`GET /api/errors`** — Incident lifecycle log (active outages and last 50 resolved incidents).
+* **`GET /api/alerts`** — Logs of the last 100 sent Telegram notifications.
+* **`GET /api/stats`** — Compiled performance stats over the last 24 hours (uptime ratios, run/failure counts, average response times).
 
 ---
 
-## 🧪 Тестирование
+## 📝 Logging & Rotation
 
-Запуск юнит и интеграционных тестов (выполняется внутри контейнера):
+Logs are routed into dedicated channels using Monolog and rotate weekly (retaining last 7 log files) to prevent disk consumption:
+
+* `var/log/application.log` — Standard Symfony application logs.
+* `var/log/monitor.log` — Monitor scheduler logs and check run statuses.
+* `var/log/llm.log` — Log of LLM prompt requests and raw model responses.
+
+---
+
+## 🧪 Testing
+
+To run the unit and integration test suite inside the container:
 ```bash
 docker compose run --rm app vendor/bin/phpunit
 ```
-YAML-парсинг и интеграционные тесты используют тестовую SQLite базу данных `in-memory`, воссоздавая схему на лету через `SchemaTool`.
+Test cases run isolated in-memory SQLite instances, constructing database schemas dynamically via Doctrine `SchemaTool`.
