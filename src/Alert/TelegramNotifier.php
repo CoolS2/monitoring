@@ -3,13 +3,15 @@
 namespace App\Alert;
 
 use App\Config\TelegramConfig;
+use Psr\Log\LoggerInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 class TelegramNotifier
 {
     public function __construct(
         private HttpClientInterface $client,
-        private TelegramConfig $config
+        private TelegramConfig $config,
+        private LoggerInterface $telegramLogger
     ) {}
 
     /**
@@ -19,8 +21,13 @@ class TelegramNotifier
     {
         $url = sprintf('https://api.telegram.org/bot%s/sendMessage', $this->config->token);
 
+        $this->telegramLogger->info('Sending Telegram notification request.', [
+            'chat_id' => $this->config->chatId,
+            'text' => $text
+        ]);
+
         try {
-            $this->client->request('POST', $url, [
+            $response = $this->client->request('POST', $url, [
                 'json' => [
                     'chat_id' => $this->config->chatId,
                     'text' => $text,
@@ -28,8 +35,22 @@ class TelegramNotifier
                     'disable_web_page_preview' => true
                 ]
             ]);
+
+            $statusCode = $response->getStatusCode();
+            if ($statusCode !== 200) {
+                $content = $response->getContent(false);
+                throw new \Exception(sprintf('Telegram API returned status code %d: %s', $statusCode, $content));
+            }
+
+            $this->telegramLogger->info('Telegram notification sent successfully.', [
+                'chat_id' => $this->config->chatId
+            ]);
         } catch (\Throwable $e) {
-            // Log or ignore alert delivery failures to prevent crashing the monitoring loop
+            $this->telegramLogger->error('Telegram notification delivery failed.', [
+                'chat_id' => $this->config->chatId,
+                'error' => $e->getMessage(),
+                'text' => $text
+            ]);
         }
     }
 

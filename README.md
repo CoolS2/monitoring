@@ -42,6 +42,7 @@ TELEGRAM_CHAT_ID=your_chat_id
 # LLM Configuration (e.g. Ollama running on host)
 LLM_ENDPOINT=http://host.docker.internal:11434/v1
 LLM_MODEL=llama3
+LLM_TIMEOUT=30 # Response generation timeout in seconds (useful for slow local LLMs)
 
 # SSH Credentials for remote monitoring
 SSH_PRIVATE_KEY_PATH=/root/.ssh/id_rsa
@@ -150,7 +151,8 @@ Logs are routed into dedicated channels using Monolog and rotate weekly (retaini
 
 * `var/log/application.log` — Standard Symfony application logs.
 * `var/log/monitor.log` — Monitor scheduler logs and check run statuses.
-* `var/log/llm.log` — Log of LLM prompt requests and raw model responses.
+* `var/log/llm.log` — Log of LLM prompt requests and raw model responses (and configuration parameters).
+* `var/log/telegram.log` — Dedicated log channel for Telegram notification delivery requests, outcomes, payloads, and error traces.
 
 ---
 

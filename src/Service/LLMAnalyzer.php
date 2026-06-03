@@ -15,7 +15,9 @@ class LLMAnalyzer
         #[Autowire(env: 'LLM_ENDPOINT')]
         private string $endpoint,
         #[Autowire(env: 'LLM_MODEL')]
-        private string $model
+        private string $model,
+        #[Autowire(env: 'int:LLM_TIMEOUT')]
+        private int $timeout
     ) {}
 
     /**
@@ -47,7 +49,8 @@ class LLMAnalyzer
         $this->llmLogger->info('Sending analysis request to LLM.', [
             'model' => $this->model,
             'check' => $checkKey,
-            'prompt' => $prompt
+            'prompt' => $prompt,
+            'timeout' => $this->timeout
         ]);
 
         try {
@@ -61,7 +64,7 @@ class LLMAnalyzer
                     'temperature' => 0.1,
                     'response_format' => ['type' => 'json_object'] // Force JSON mode if supported
                 ],
-                'timeout' => 30 // Wait up to 30s for local LLMs
+                'timeout' => $this->timeout
             ]);
 
             $statusCode = $response->getStatusCode();
