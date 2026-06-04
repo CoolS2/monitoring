@@ -8,9 +8,15 @@ chmod -R 777 /app/var
 # Run database migrations
 php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration
 
-# Setup cron job to run the scheduler command every minute, and daily summary at 23:59
-echo "* * * * * cd /app && php bin/console app:monitor:run >> /app/var/cron.log 2>&1" > /etc/crontabs/root
-echo "59 23 * * * cd /app && php bin/console app:monitor:daily-summary >> /app/var/cron.log 2>&1" >> /etc/crontabs/root
+# Setup cron jobs:
+#   - Every minute : run due monitor checks
+#   - 23:59 daily  : send daily summary
+#   - 03:00 Sunday : wipe rotated log files older than 7 days to keep disk clean
+cat > /etc/crontabs/root <<'EOF'
+* * * * * cd /app && php bin/console app:monitor:run >> /app/var/cron.log 2>&1
+59 23 * * * cd /app && php bin/console app:monitor:daily-summary >> /app/var/cron.log 2>&1
+0 3 * * 0 find /app/var/log -type f -name "*.log" -mtime +7 -delete >> /app/var/cron.log 2>&1
+EOF
 
 # Start cron daemon in the background
 crond -b -d 8

@@ -4,28 +4,40 @@ monolog:
         main:
             type: rotating_file
             path: "%kernel.logs_dir%/application.log"
-            level: debug
+            level: warning
             max_files: 7
-            channels: ["!monitor", "!llm", "!telegram"]
+            channels: ["!monitor", "!llm", "!telegram", "!php"]
+
+        # Separate handler for php channel to suppress User Deprecated INFO noise
+        php:
+            type: rotating_file
+            path: "%kernel.logs_dir%/application.log"
+            level: warning
+            max_files: 7
+            channels: ["php"]
+
         monitor:
             type: rotating_file
             path: "%kernel.logs_dir%/monitor.log"
             level: info
             max_files: 7
             channels: ["monitor"]
+
         llm:
             type: rotating_file
             path: "%kernel.logs_dir%/llm.log"
             level: info
             max_files: 7
             channels: ["llm"]
+
         telegram:
             type: rotating_file
             path: "%kernel.logs_dir%/telegram.log"
             level: info
             max_files: 7
             channels: ["telegram"]
+
         console:
             type: console
             process_psr_3_messages: false
-            channels: ["!event", "!doctrine"]
+            channels: ["!event", "!doctrine", "!php"]

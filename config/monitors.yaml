@@ -12,10 +12,26 @@ checks:
     interval: 60
     expect_body_contains: "ok"
 
+  # Nginx error log check — multiple hosts and files in a single check entry.
+  # All targets are checked; the check fails if any grep matches are found on any target.
   nginx_errors:
     type: ssh_log
-    host: "YOUR_VPS_IP"
-    user: "root"
-    file: "/var/log/nginx/error.log"
-    grep: "error"
+    user: root           # default user for all targets (can be overridden per-target)
+    grep: "error|crit"
+    lines: 200
     interval: 300
+    targets:
+      - host: "YOUR_VPS_IP_1"
+        file: "/var/log/nginx/error.log"
+      - host: "YOUR_VPS_IP_2"
+        file: "/var/log/nginx/error.log"
+        port: 2222       # optional: custom SSH port
+
+  # Legacy single-host format is still fully supported:
+  # nginx_errors:
+  #   type: ssh_log
+  #   host: "YOUR_VPS_IP"
+  #   user: root
+  #   file: /var/log/nginx/error.log
+  #   grep: "error|crit"
+  #   interval: 300

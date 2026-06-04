@@ -12,7 +12,7 @@ Built with **Symfony 8.1+**, **PHP 8.5+**, **Doctrine ORM (SQLite)**, and **Dock
 2. **Supported Checkers**:
    - **HTTP/HTTPS**: Verifies status codes, response latency, redirect counts, and body content matching (`expect_body_contains`).
    - **SSL Certificates**: Native SSL certificate expiration checking using PHP stream sockets (triggers warnings N days before expiration).
-   - **SSH Log Checker**: Connects via SSH key to remote host logs, retrieves the last N lines, and parses them using grep/regex error patterns.
+   - **SSH Log Checker**: Connects via SSH key to remote host logs, retrieves the last N lines, and parses them using grep/regex error patterns. Supports **multiple hosts and files** in a single check entry via `targets`.
    - **Docker Checker**: Agentless remote container monitoring via SSH: tracks container states (running/exited), unhealthy statuses, and high restart counts.
 3. **Local LLM Integration**:
    - Supports any OpenAI-compatible API runtime (Ollama, LocalAI, OpenWebUI, LM Studio).
@@ -73,13 +73,27 @@ checks:
     interval: 60
     expect_body_contains: "ok"
 
-  # Nginx log error checking on remote host
+  # Nginx log error checking — multiple hosts in a single check entry.
+  # All targets are polled; the check fails if any grep matches are found on any target.
   nginx_errors:
+    type: ssh_log
+    user: root           # default user applied to all targets (can be overridden per-target)
+    grep: "error|crit"
+    lines: 200
+    interval: 300
+    targets:
+      - host: 192.168.1.50
+        file: /var/log/nginx/error.log
+      - host: 192.168.1.51
+        file: /var/log/nginx/error.log
+        port: 2222       # optional: non-standard SSH port
+
+  # Legacy single-host format (still fully supported):
+  nginx_errors_single:
     type: ssh_log
     host: 192.168.1.50
     user: root
     file: /var/log/nginx/error.log
-    lines: 200
     grep: "error|crit"
     interval: 300
 
@@ -98,6 +112,23 @@ checks:
     max_restarts: 3
     interval: 120
 ```
+
+### `ssh_log` — Multi-target format
+
+The `targets` key accepts a list of `{host, file}` pairs. Common options (`user`, `grep`, `lines`, `port`) can be defined at the check level as defaults and overridden per-target:
+
+| Field | Level | Description |
+|---|---|---|
+| `user` | check or target | SSH user (default: `root`) |
+| `grep` | check | Regex pattern passed to `grep -E -i`. Any match → failure |
+| `lines` | check | Number of tail lines to read (default: `200`) |
+| `interval` | check | Check interval in seconds |
+| `targets[].host` | target | **Required**. Remote hostname or IP |
+| `targets[].file` | target | **Required**. Absolute path to the log file |
+| `targets[].port` | target | Optional SSH port (default: `22`) |
+| `targets[].user` | target | Optional per-target SSH user override |
+
+Each matched line in the output is prefixed with `[host]` so you can identify the source at a glance.
 
 ### 2. Deployment
 
@@ -147,12 +178,20 @@ All endpoints return JSON responses:
 
 ## 📝 Logging & Rotation
 
-Logs are routed into dedicated channels using Monolog and rotate weekly (retaining last 7 log files) to prevent disk consumption:
+Logs are routed into dedicated channels using Monolog. Only `warning` level and above is persisted to disk to suppress noisy INFO/DEBUG output (including Symfony deprecation notices). Log files rotate daily and are automatically purged weekly:
 
-* `var/log/application.log` — Standard Symfony application logs.
-* `var/log/monitor.log` — Monitor scheduler logs and check run statuses.
-* `var/log/llm.log` — Log of LLM prompt requests and raw model responses (and configuration parameters).
-* `var/log/telegram.log` — Dedicated log channel for Telegram notification delivery requests, outcomes, payloads, and error traces.
+* `var/log/application.log` — Standard Symfony application logs (`warning`+).
+* `var/log/monitor.log` — Monitor scheduler logs and check run statuses (`info`+).
+* `var/log/llm.log` — Log of LLM prompt requests and raw model responses (`info`+).
+* `var/log/telegram.log` — Dedicated log channel for Telegram notification delivery requests, outcomes, payloads, and error traces (`info`+).
+
+### Log Retention
+
+| Mechanism | Detail |
+|---|---|
+| Daily rotation | Monolog `rotating_file` appends the date to each log file |
+| File retention | `max_files: 7` — Monolog keeps the last 7 daily files per channel |
+| Weekly hard purge | Cron job runs every Sunday at 03:00 UTC: `find /app/var/log -name "*.log" -mtime +7 -delete` |
 
 ---
 
