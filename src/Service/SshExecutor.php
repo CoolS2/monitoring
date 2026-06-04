@@ -24,20 +24,25 @@ class SshExecutor
             return [false, sprintf('SSH private key not found at: %s', $this->privateKeyPath)];
         }
 
-        $portOption = $port ? sprintf('-p %d', $port) : '';
-
-        // Build command arguments array
         $cmd = ['ssh'];
-        if (!empty($portOption)) {
+
+        if ($port !== null) {
             $cmd[] = '-p';
             $cmd[] = (string) $port;
         }
+
         $cmd[] = '-i';
         $cmd[] = $this->privateKeyPath;
         $cmd[] = '-o';
         $cmd[] = 'StrictHostKeyChecking=no';
         $cmd[] = '-o';
+        $cmd[] = 'BatchMode=yes';           // Never prompt for password; fail immediately
+        $cmd[] = '-o';
         $cmd[] = 'ConnectTimeout=' . $this->timeout;
+        $cmd[] = '-o';
+        $cmd[] = 'ServerAliveInterval=5';   // Detect stale connections early
+        $cmd[] = '-o';
+        $cmd[] = 'ServerAliveCountMax=2';
         $cmd[] = sprintf('%s@%s', $user ?: 'root', $host);
         $cmd[] = $command;
 

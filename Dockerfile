@@ -18,8 +18,13 @@ WORKDIR /app
 # Copy application files
 COPY . .
 
-# Install dependencies (ignoring platform reqs during build to avoid issues with host/builder PHP differences)
-RUN composer install --no-interaction --optimize-autoloader --ignore-platform-reqs
+# Install production dependencies only; warm up the DI container cache
+RUN APP_ENV=prod composer install \
+        --no-interaction \
+        --no-dev \
+        --optimize-autoloader \
+        --ignore-platform-reqs \
+    && APP_ENV=prod php bin/console cache:warmup --no-debug
 
 # Make entrypoint executable
 RUN chmod +x docker-entrypoint.sh

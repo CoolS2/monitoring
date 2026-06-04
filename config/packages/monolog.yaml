@@ -6,15 +6,7 @@ monolog:
             path: "%kernel.logs_dir%/application.log"
             level: warning
             max_files: 7
-            channels: ["!monitor", "!llm", "!telegram", "!php"]
-
-        # Separate handler for php channel to suppress User Deprecated INFO noise
-        php:
-            type: rotating_file
-            path: "%kernel.logs_dir%/application.log"
-            level: warning
-            max_files: 7
-            channels: ["php"]
+            channels: ["!monitor", "!llm", "!telegram"]
 
         monitor:
             type: rotating_file
@@ -40,4 +32,15 @@ monolog:
         console:
             type: console
             process_psr_3_messages: false
-            channels: ["!event", "!doctrine", "!php"]
+            channels: ["!event", "!doctrine"]
+
+# In dev mode, keep debug-level logging to stderr for visibility
+when@dev:
+    monolog:
+        handlers:
+            main:
+                type: rotating_file
+                path: "%kernel.logs_dir%/application.log"
+                level: debug
+                max_files: 7
+                channels: ["!monitor", "!llm", "!telegram"]

@@ -23,15 +23,14 @@ class HttpChecker implements CheckerInterface
         $startTime = microtime(true);
 
         try {
-            // We set timeout and redirects limit according to config or defaults
             $response = $this->client->request('GET', $url, [
-                'timeout' => $config['timeout'] ?? 10,
+                'timeout'       => $config['timeout'] ?? 10,
                 'max_redirects' => $config['max_redirects'] ?? 5,
             ]);
 
             // Force request execution by retrieving status code
-            $statusCode = $response->getStatusCode();
-            $body = $response->getContent(false);
+            $statusCode   = $response->getStatusCode();
+            $body         = $response->getContent(false);
             $responseTime = round(microtime(true) - $startTime, 3);
 
             // Verify expected HTTP status code (defaults to 200)
@@ -46,16 +45,14 @@ class HttpChecker implements CheckerInterface
             }
 
             // Verify body contents if requested
-            if (isset($config['expect_body_contains']) && !str_empty($config['expect_body_contains'])) {
-                $needle = $config['expect_body_contains'];
-                if (!str_contains($body, $needle)) {
-                    return new CheckOutcome(
-                        false,
-                        sprintf('Body does not contain: "%s"', $needle),
-                        $responseTime,
-                        ['status_code' => $statusCode, 'body_preview' => mb_substr($body, 0, 500)]
-                    );
-                }
+            $needle = $config['expect_body_contains'] ?? '';
+            if ($needle !== '' && !str_contains($body, $needle)) {
+                return new CheckOutcome(
+                    false,
+                    sprintf('Body does not contain: "%s"', $needle),
+                    $responseTime,
+                    ['status_code' => $statusCode, 'body_preview' => mb_substr($body, 0, 500)]
+                );
             }
 
             return new CheckOutcome(true, 'OK', $responseTime, ['status_code' => $statusCode]);
@@ -68,13 +65,5 @@ class HttpChecker implements CheckerInterface
                 $responseTime
             );
         }
-    }
-}
-
-// Helper to check for empty strings
-if (!function_exists('App\Checker\str_empty')) {
-    function str_empty(?string $str): bool
-    {
-        return $str === null || trim($str) === '';
     }
 }

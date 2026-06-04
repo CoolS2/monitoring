@@ -2,13 +2,16 @@ services:
   app:
     build: .
     container_name: monitoring_app
+    restart: unless-stopped
     ports:
       - "8000:8000"
+    environment:
+      APP_ENV: prod
+    env_file:
+      - .env
     volumes:
-      - ./var:/app/var
-      - ./config/monitors.yaml:/app/config/monitors.yaml:ro
-      - ./.env:/app/.env
-      - ${SSH_PRIVATE_KEY_PATH:-/root/.ssh/id_rsa}:/root/.ssh/id_rsa:ro
+      - ./var:/app/var                                                  # SQLite database & rotating logs
+      - ./config/monitors.yaml:/app/config/monitors.yaml:ro            # Read-only checks config
+      - ${SSH_PRIVATE_KEY_PATH:-/root/.ssh/id_rsa}:/root/.ssh/id_rsa:ro # Read-only SSH private key
     extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: unless-stopped
+      - "host.docker.internal:host-gateway"                             # Allows connecting to host-bound LLM
