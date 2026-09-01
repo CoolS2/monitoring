@@ -3,6 +3,7 @@ FROM php:8.4-cli-alpine
 # Install system dependencies and PHP extensions
 RUN apk add --no-cache \
     openssh-client \
+    busybox-suid \
     git \
     unzip \
     sqlite-dev \
@@ -18,13 +19,17 @@ WORKDIR /app
 # Copy application files
 COPY . .
 
-# Install production dependencies only; warm up the DI container cache
-RUN APP_ENV=prod composer install \
+# Install production dependencies only, then compile the DI container.
+#
+# Platform requirements are deliberately NOT ignored: the lock file targets
+# PHP >= 8.4 and a mismatch should fail the build, not the first cron run.
+# The warm cache itself is shadowed by the ./var bind mount at runtime, but
+# compiling here still turns a broken service definition into a build error.
+RUN APP_ENV=prod APP_SECRET=build composer install \
         --no-interaction \
         --no-dev \
         --optimize-autoloader \
-        --ignore-platform-reqs \
-    && APP_ENV=prod php bin/console cache:warmup --no-debug
+    && APP_ENV=prod APP_SECRET=build php bin/console cache:warmup --no-debug
 
 # Make entrypoint executable
 RUN chmod +x docker-entrypoint.sh

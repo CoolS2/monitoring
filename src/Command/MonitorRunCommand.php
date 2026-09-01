@@ -2,13 +2,13 @@
 
 namespace App\Command;
 
+use App\Alert\TelegramNotifier;
 use App\Checker\CheckerInterface;
 use App\Checker\CheckOutcome;
 use App\Entity\CheckError;
 use App\Entity\CheckResult;
 use App\Entity\LLMAnalysis;
 use App\Entity\Notification;
-use App\Alert\TelegramNotifier;
 use App\Service\LLMAnalyzer;
 use App\Service\MonitorScheduler;
 use Doctrine\ORM\EntityManagerInterface;
@@ -26,11 +26,9 @@ use Symfony\Component\DependencyInjection\Attribute\TaggedIterator;
 )]
 class MonitorRunCommand extends Command
 {
-    private iterable $checkers;
-
     public function __construct(
         #[TaggedIterator('app.checker')]
-        iterable $checkers,
+        private iterable $checkers,
         private MonitorScheduler $scheduler,
         private TelegramNotifier $notifier,
         private LLMAnalyzer $llmAnalyzer,
@@ -39,7 +37,6 @@ class MonitorRunCommand extends Command
         #[Autowire(env: 'int:NOTIFICATION_COOLDOWN')]
         private int $cooldownMinutes = 60
     ) {
-        $this->checkers = $checkers;
         parent::__construct();
     }
 
@@ -54,7 +51,9 @@ class MonitorRunCommand extends Command
         $output->writeln(sprintf('Running %d due checks...', count($dueChecks)));
 
         foreach ($dueChecks as $key => $checkConfig) {
-            $type = $checkConfig['type'] ?? '';
+            $key  = (string) $key;
+            $type = (string) ($checkConfig['type'] ?? '');
+
             $checker = $this->findChecker($type);
 
             if (!$checker) {
@@ -65,23 +64,33 @@ class MonitorRunCommand extends Command
             }
 
             try {
-                // Execute the check
                 $outcome = $checker->check($checkConfig);
+            } catch (\Throwable $e) {
+                // A checker that blows up is itself a monitoring signal: record it
+                // as a failed run instead of silently skipping the check.
+                $this->monitorLogger->error('Exception occurred during check execution', [
+                    'check_key' => $key,
+                    'exception' => $e->getMessage(),
+                ]);
+                $output->writeln(sprintf('<error>Exception for %s: %s</error>', $key, $e->getMessage()));
 
+                $outcome = new CheckOutcome(false, sprintf('Checker crashed: %s', $e->getMessage()));
+            }
+
+            try {
                 // Handle the check lifecycle and state machine
                 $this->processCheckOutcome($key, $type, $outcome);
 
+                // Flush per check so a later failure cannot discard earlier results.
+                $this->entityManager->flush();
             } catch (\Throwable $e) {
-                $this->monitorLogger->error('Exception occurred during check execution', [
+                $this->monitorLogger->error('Failed to persist check outcome', [
                     'check_key' => $key,
-                    'exception' => $e->getMessage()
+                    'exception' => $e->getMessage(),
                 ]);
-                $output->writeln(sprintf('<error>Exception for %s: %s</error>', $key, $e->getMessage()));
+                $output->writeln(sprintf('<error>Persistence error for %s: %s</error>', $key, $e->getMessage()));
             }
         }
-
-        // Flush all database changes (results, errors, notifications, analyses) at the end
-        $this->entityManager->flush();
 
         $output->writeln('Monitoring check completed successfully.');
         return Command::SUCCESS;
@@ -97,6 +106,7 @@ class MonitorRunCommand extends Command
                 return $checker;
             }
         }
+
         return null;
     }
 
@@ -105,129 +115,131 @@ class MonitorRunCommand extends Command
      */
     private function processCheckOutcome(string $key, string $type, CheckOutcome $outcome): void
     {
-        // 1. Fetch previous run state from the database
-        $resultRepo = $this->entityManager->getRepository(CheckResult::class);
-        $lastResult = $resultRepo->findOneBy(
-            ['checkKey' => $key],
-            ['createdAt' => 'DESC']
-        );
-
-        $wasSuccess = $lastResult ? $lastResult->isSuccess() : true;
-
-        // 2. Persist the new check run result
-        $newResult = new CheckResult(
+        // 1. Persist the new check run result
+        $this->entityManager->persist(new CheckResult(
             $key,
             $type,
             $outcome->success,
             $outcome->message,
             $outcome->responseTime,
             $outcome->extra
-        );
-        $this->entityManager->persist($newResult);
+        ));
 
-        // Extract extra log/details context for LLM if available
-        $details = null;
-        if (isset($outcome->extra['matched_lines'])) {
-            $details = implode("\n", $outcome->extra['matched_lines']);
-        } elseif (isset($outcome->extra['problematic'])) {
-            $details = json_encode($outcome->extra['problematic'], JSON_PRETTY_PRINT);
-        } elseif (isset($outcome->extra['body_preview'])) {
-            $details = $outcome->extra['body_preview'];
-        }
+        $errorRepo = $this->entityManager->getRepository(CheckError::class);
 
-        // 3. State transition logic
+        // 2. State transition logic, driven by the open incident rather than by
+        //    the previous run: an incident stays open until the check recovers.
         if (!$outcome->success) {
-            // STATE: Failure
             $this->monitorLogger->warning(sprintf('Check failed: %s - %s', $key, $outcome->message), [
-                'type' => $type,
-                'latency' => $outcome->responseTime
+                'type'    => $type,
+                'latency' => $outcome->responseTime,
             ]);
 
-            // Find or create active error record
-            $errorRepo = $this->entityManager->getRepository(CheckError::class);
-            $activeError = $errorRepo->findOneBy([
-                'checkKey' => $key,
-                'resolvedAt' => null
-            ]);
+            /** @var CheckError|null $activeError */
+            $activeError = $errorRepo->findOneBy(['checkKey' => $key, 'resolvedAt' => null], ['createdAt' => 'DESC']);
 
-            if (!$activeError) {
-                // TRANSITION: SUCCESS -> FAILURE (New Outage)
-                $activeError = new CheckError($key, $outcome->message, $details);
+            $isNewOutage = $activeError === null;
+
+            if ($isNewOutage) {
+                // TRANSITION: SUCCESS -> FAILURE (new outage)
+                $activeError = new CheckError($key, $outcome->message, $this->extractDetails($outcome));
                 $this->entityManager->persist($activeError);
             }
 
-            // Determine if we should send a Telegram notification (handling cooldown)
-            if ($this->shouldSendAlertNotification($key)) {
-                // Execute LLM Analysis for this failure
-                $llmResult = $this->llmAnalyzer->analyze($key, $type, $outcome->message, $details);
-
-                if ($llmResult['success']) {
-                    $analysis = new LLMAnalysis(
-                        $activeError,
-                        $llmResult['prompt'],
-                        $llmResult['raw_response'],
-                        $llmResult['summary'],
-                        $llmResult['probable_cause'],
-                        $llmResult['severity'],
-                        $llmResult['recommendations']
-                    );
-                    $this->entityManager->persist($analysis);
-                }
-
-                // Send Alert message on Telegram
-                $this->notifier->sendAlert(
-                    $key,
-                    $type,
-                    $outcome->message,
-                    $outcome->responseTime,
-                    $llmResult['success'] ? $llmResult : null
-                );
-
-                // Log the notification in history
-                $notification = new Notification($key, 'error', $outcome->message);
-                $this->entityManager->persist($notification);
+            // A brand new outage is always announced immediately; the cooldown
+            // only throttles repeated reminders about an incident already open.
+            if (!$isNewOutage && !$this->cooldownElapsed($key)) {
+                return;
             }
 
-        } else {
-            // STATE: Success
-            if (!$wasSuccess) {
-                // TRANSITION: FAILURE -> SUCCESS (Service Recovered!)
-                $this->monitorLogger->info(sprintf('Check recovered: %s', $key));
+            $llmResult = $this->llmAnalyzer->analyze($key, $type, $outcome->message, $this->extractDetails($outcome));
 
-                $errorRepo = $this->entityManager->getRepository(CheckError::class);
-                /** @var CheckError|null $activeError */
-                $activeError = $errorRepo->findOneBy([
-                    'checkKey' => $key,
-                    'resolvedAt' => null
-                ]);
-
-                $downtimeMinutes = null;
-                if ($activeError) {
-                    $activeError->resolve();
-                    $downtimeSeconds = time() - $activeError->getCreatedAt()->getTimestamp();
-                    $downtimeMinutes = round($downtimeSeconds / 60, 1);
-                }
-
-                // Send recovery message on Telegram
-                $this->notifier->sendRecovery($key, $type, $downtimeMinutes);
-
-                // Log notification
-                $notification = new Notification($key, 'recovery', 'OK');
-                $this->entityManager->persist($notification);
-            } else {
-                // TRANSITION: SUCCESS -> SUCCESS (Steady State)
-                $this->monitorLogger->debug(sprintf('Check healthy: %s', $key));
+            if ($llmResult['success']) {
+                $this->entityManager->persist(new LLMAnalysis(
+                    $activeError,
+                    $llmResult['prompt'],
+                    $llmResult['raw_response'],
+                    $llmResult['summary'],
+                    $llmResult['probable_cause'],
+                    $llmResult['severity'],
+                    $llmResult['recommendations']
+                ));
             }
+
+            $this->notifier->sendAlert(
+                $key,
+                $type,
+                $outcome->message,
+                $outcome->responseTime,
+                $llmResult
+            );
+
+            $this->entityManager->persist(new Notification($key, 'error', $outcome->message));
+
+            return;
         }
+
+        // STATE: Success
+        /** @var list<CheckError> $openErrors */
+        $openErrors = $errorRepo->findBy(['checkKey' => $key, 'resolvedAt' => null], ['createdAt' => 'ASC']);
+
+        if (empty($openErrors)) {
+            // TRANSITION: SUCCESS -> SUCCESS (steady state)
+            $this->monitorLogger->debug(sprintf('Check healthy: %s', $key));
+            return;
+        }
+
+        // TRANSITION: FAILURE -> SUCCESS (service recovered)
+        $this->monitorLogger->info(sprintf('Check recovered: %s', $key));
+
+        $downtimeMinutes = round((time() - $openErrors[0]->getCreatedAt()->getTimestamp()) / 60, 1);
+
+        foreach ($openErrors as $openError) {
+            $openError->resolve();
+        }
+
+        $this->notifier->sendRecovery($key, $type, $downtimeMinutes);
+        $this->entityManager->persist(new Notification($key, 'recovery', 'OK'));
     }
 
     /**
-     * Checks if a failure notification is due to be sent based on cooldown parameters.
+     * Extracts the richest context the checker produced, for the LLM and for the
+     * incident record.
      */
-    private function shouldSendAlertNotification(string $key): bool
+    private function extractDetails(CheckOutcome $outcome): ?string
     {
-        $notificationRepo = $this->entityManager->getRepository(Notification::class);
-        $lastNotification = $notificationRepo->findOneBy(
+        $extra = $outcome->extra;
+
+        if (!empty($extra['output']) && is_string($extra['output'])) {
+            return $extra['output'];
+        }
+
+        if (!empty($extra['matched_lines']) && is_array($extra['matched_lines'])) {
+            return implode("\n", $extra['matched_lines']);
+        }
+
+        if (!empty($extra['problematic'])) {
+            return json_encode($extra['problematic'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: null;
+        }
+
+        if (!empty($extra['body_preview']) && is_string($extra['body_preview'])) {
+            return $extra['body_preview'];
+        }
+
+        return null;
+    }
+
+    /**
+     * True when enough time has passed since the last failure notification for
+     * this check to send a reminder.
+     */
+    private function cooldownElapsed(string $key): bool
+    {
+        if ($this->cooldownMinutes <= 0) {
+            return true;
+        }
+
+        $lastNotification = $this->entityManager->getRepository(Notification::class)->findOneBy(
             ['checkKey' => $key, 'type' => 'error'],
             ['sentAt' => 'DESC']
         );
@@ -236,9 +248,6 @@ class MonitorRunCommand extends Command
             return true;
         }
 
-        $elapsedSeconds = time() - $lastNotification->getSentAt()->getTimestamp();
-        $cooldownSeconds = $this->cooldownMinutes * 60;
-
-        return $elapsedSeconds >= $cooldownSeconds;
+        return (time() - $lastNotification->getSentAt()->getTimestamp()) >= $this->cooldownMinutes * 60;
     }
 }

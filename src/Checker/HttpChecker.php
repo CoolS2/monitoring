@@ -15,17 +15,24 @@ class HttpChecker implements CheckerInterface
 
     public function check(array $config): CheckOutcome
     {
-        $url = $config['url'] ?? '';
-        if (empty($url)) {
+        $url = (string) ($config['url'] ?? '');
+        if ($url === '') {
             return new CheckOutcome(false, 'Missing target URL');
         }
+
+        $timeout = (float) ($config['timeout'] ?? 10);
 
         $startTime = microtime(true);
 
         try {
             $response = $this->client->request('GET', $url, [
-                'timeout'       => $config['timeout'] ?? 10,
-                'max_redirects' => $config['max_redirects'] ?? 5,
+                // `timeout` is the idle timeout between chunks; `max_duration`
+                // bounds the whole request so a trickling server cannot hang
+                // the cron run indefinitely.
+                'timeout'       => $timeout,
+                'max_duration'  => $timeout * 3,
+                'max_redirects' => (int) ($config['max_redirects'] ?? 5),
+                'headers'       => ['User-Agent' => 'monitoring-bot/1.0'],
             ]);
 
             // Force request execution by retrieving status code
@@ -33,8 +40,9 @@ class HttpChecker implements CheckerInterface
             $body         = $response->getContent(false);
             $responseTime = round(microtime(true) - $startTime, 3);
 
-            // Verify expected HTTP status code (defaults to 200)
-            $expectedStatus = $config['expect_status'] ?? 200;
+            // Verify expected HTTP status code (defaults to 200).
+            // Cast because YAML happily yields the string "200".
+            $expectedStatus = (int) ($config['expect_status'] ?? 200);
             if ($statusCode !== $expectedStatus) {
                 return new CheckOutcome(
                     false,
@@ -45,7 +53,7 @@ class HttpChecker implements CheckerInterface
             }
 
             // Verify body contents if requested
-            $needle = $config['expect_body_contains'] ?? '';
+            $needle = (string) ($config['expect_body_contains'] ?? '');
             if ($needle !== '' && !str_contains($body, $needle)) {
                 return new CheckOutcome(
                     false,

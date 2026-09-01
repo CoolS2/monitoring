@@ -1,5 +1,85 @@
 checks:
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Server health report — runs the /usr/local/sbin/monitor-* scripts and
+  # feeds their output to the LLM, which returns a short Telegram digest.
+  #
+  # A section's status comes from the "STATUS: OK|WARN|CRIT" line the script
+  # prints. Scripts that only print data (df/free tables, raw log tails) are
+  # graded by `rules` instead: each rule measures a number in the output —
+  # a captured value, or the count of matching lines — and compares it with
+  # its thresholds. The worst status across all sections decides whether the
+  # check fails (see `fail_on`).
+  #
+  # Remove `host`/`user` to run the scripts on the machine the monitoring
+  # service itself lives on instead of over SSH.
+  # ─────────────────────────────────────────────────────────────────────────
+  server_health:
+    type: script
+    host: "YOUR_SERVER_IP"
+    user: root
+    interval: 3600        # collect once an hour (monitor-logs looks 1h back)
+    timeout: 60           # per-command timeout in seconds
+    fail_on: [WARN, CRIT] # statuses that turn the check into an alert
+    commands:
+
+      # This script grades itself with a "STATUS: OK|WARN|CRIT" line,
+      # so it needs no rules.
+      LOGS: "sudo -u monitor sudo /usr/local/sbin/monitor-logs"
+
+      # These print plain data and never announce a status. Rules measure a
+      # number in the output and compare it against thresholds.
+      SYSTEM:
+        command: "sudo -u monitor sudo /usr/local/sbin/monitor-system"
+        rules:
+          # "/dev/sda1  97G  25G  73G  26% /"  ->  26
+          - name: "Disk usage /"
+            match: '(\d+)%\s+/$'
+            unit: "%"
+            warn_above: 80
+            crit_above: 90
+          # "load average: 0.27, 0.34, 0.35"  ->  0.27
+          # Set these to roughly 2x and 4x your CPU core count.
+          - name: "Load average (1 min)"
+            match: 'load average: ([0-9.]+)'
+            warn_above: 4
+            crit_above: 8
+
+      # A raw log tail: only the last lines are kept in the report, but the
+      # rules below still see the complete output.
+      PM2_LOGS:
+        command: "sudo -u monitor sudo /usr/local/sbin/monitor-pm2-logs"
+        max_lines: 40
+        rules:
+          # Tune this pattern to your application. Broad words like "error"
+          # also match harmless stack-trace noise such as `createError`.
+          - name: "Fatal log lines"
+            match: 'FATAL|ECONNREFUSED|UnhandledPromiseRejection|out of memory|heap out'
+            warn_above: 0
+            crit_above: 10
+
+      PM2:
+        command: "sudo -u monitor sudo /usr/local/sbin/monitor-pm2"
+        rules:
+          - name: "Processes not online"
+            match: '\b(errored|stopped|stopping|launching)\b'
+            warn_above: 0
+
+      SERVICES:
+        command: "sudo -u monitor sudo /usr/local/sbin/monitor-services"
+        rules:
+          - name: "Services down"
+            match: 'NOT RUNNING|inactive|failed'
+            warn_above: 0
+            crit_above: 2
+
+      NGINX:
+        command: "sudo -u monitor sudo /usr/local/sbin/monitor-nginx"
+        rules:
+          - name: "Nginx problems"
+            match: 'NOT RUNNING|test failed|emerg'
+            warn_above: 0
+
   website:
     type: http
     url: "https://example.com"
@@ -13,7 +93,7 @@ checks:
     expect_body_contains: "ok"
 
   # Nginx error log check — multiple hosts and files in a single check entry.
-  # All targets are checked; the check fails if any grep matches are found on any target.
+  # All targets are checked; the check fails if any grep matches are found.
   nginx_errors:
     type: ssh_log
     user: root           # default user for all targets (can be overridden per-target)
@@ -28,10 +108,25 @@ checks:
         port: 2222       # optional: custom SSH port
 
   # Legacy single-host format is still fully supported:
-  # nginx_errors:
+  # nginx_errors_single:
   #   type: ssh_log
   #   host: "YOUR_VPS_IP"
   #   user: root
   #   file: /var/log/nginx/error.log
   #   grep: "error|crit"
   #   interval: 300
+
+  # SSL certificate expiration check
+  # my_ssl_check:
+  #   type: ssl
+  #   host: example.com
+  #   warning_days: 14
+  #   interval: 86400
+
+  # Remote Docker container health check
+  # docker_check:
+  #   type: docker
+  #   host: "YOUR_VPS_IP"
+  #   user: root
+  #   max_restarts: 3
+  #   interval: 120

@@ -25,39 +25,34 @@ class DashboardController extends AbstractController
         $config = $this->scheduler->getConfiguration();
         $checks = $config['checks'] ?? [];
 
-        // Fetch latest result for all checks in a single query
-        $qb = $this->entityManager->createQueryBuilder();
-        $qb->select('r')
-           ->from(CheckResult::class, 'r')
-           ->where('r.createdAt IN (
-               SELECT MAX(r2.createdAt) 
-               FROM App\Entity\CheckResult r2 
-               GROUP BY r2.checkKey
-           )');
-
-        $latestResults = $qb->getQuery()->getResult();
-        $resultsMap = [];
-        /** @var CheckResult $result */
-        foreach ($latestResults as $result) {
-            $resultsMap[$result->getCheckKey()] = [
-                'success' => $result->isSuccess(),
-                'message' => $result->getMessage(),
-                'response_time' => $result->getResponseTime(),
-                'last_run' => $result->getCreatedAt()->format(\DateTimeInterface::ATOM),
-                'extra' => $result->getExtra()
-            ];
-        }
+        // The latest run is resolved per key: a "MAX(createdAt) grouped by key"
+        // subquery would match rows of *other* checks that happen to share the
+        // same timestamp, and would return several rows for one key.
+        $resultRepo = $this->entityManager->getRepository(CheckResult::class);
 
         $formatted = [];
         foreach ($checks as $key => $check) {
+            if (!is_array($check)) {
+                continue;
+            }
+
+            /** @var CheckResult|null $latest */
+            $latest = $resultRepo->findOneBy(['checkKey' => (string) $key], ['createdAt' => 'DESC']);
+
             $formatted[] = [
                 'key' => $key,
                 'type' => $check['type'] ?? 'unknown',
                 'interval' => $check['interval'] ?? 60,
                 'url' => $check['url'] ?? null,
                 'host' => $check['host'] ?? null,
-                'status' => $resultsMap[$key] ?? [
-                    'success' => true,
+                'status' => $latest !== null ? [
+                    'success' => $latest->isSuccess(),
+                    'message' => $latest->getMessage(),
+                    'response_time' => $latest->getResponseTime(),
+                    'last_run' => $latest->getCreatedAt()->format(\DateTimeInterface::ATOM),
+                    'extra' => $latest->getExtra(),
+                ] : [
+                    'success' => null,
                     'message' => 'Pending check run',
                     'response_time' => null,
                     'last_run' => null,
@@ -105,11 +100,12 @@ class DashboardController extends AbstractController
             ['createdAt' => 'DESC']
         );
 
+        $analysisRepo = $this->entityManager->getRepository(LLMAnalysis::class);
+
         $formattedErrors = [];
         foreach ($activeErrors as $error) {
-            // Find LLM analysis linked to this error
-            $analysisRepo = $this->entityManager->getRepository(LLMAnalysis::class);
-            $analysis = $analysisRepo->findOneBy(['checkError' => $error]);
+            // Newest analysis linked to this incident
+            $analysis = $analysisRepo->findOneBy(['checkError' => $error], ['createdAt' => 'DESC']);
 
             $formattedErrors[] = [
                 'id' => $error->getId(),
@@ -151,7 +147,8 @@ class DashboardController extends AbstractController
         $resolved = $qb->getQuery()->getResult();
 
         $formatError = function(CheckError $error) {
-            $analysis = $this->entityManager->getRepository(LLMAnalysis::class)->findOneBy(['checkError' => $error]);
+            $analysis = $this->entityManager->getRepository(LLMAnalysis::class)
+                ->findOneBy(['checkError' => $error], ['createdAt' => 'DESC']);
             return [
                 'id' => $error->getId(),
                 'check_key' => $error->getCheckKey(),

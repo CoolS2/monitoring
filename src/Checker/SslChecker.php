@@ -11,21 +11,21 @@ class SslChecker implements CheckerInterface
 
     public function check(array $config): CheckOutcome
     {
-        $host = $config['host'] ?? '';
-        if (empty($host)) {
-            $url = $config['url'] ?? '';
-            if (!empty($url)) {
-                $host = parse_url($url, PHP_URL_HOST);
+        $host = (string) ($config['host'] ?? '');
+        if ($host === '') {
+            $url = (string) ($config['url'] ?? '');
+            if ($url !== '') {
+                $host = (string) (parse_url($url, PHP_URL_HOST) ?? '');
             }
         }
 
-        if (empty($host)) {
+        if ($host === '') {
             return new CheckOutcome(false, 'Missing host or URL for SSL check');
         }
 
-        $port = $config['port'] ?? 443;
-        $timeout = $config['timeout'] ?? 10;
-        $warningDays = $config['warning_days'] ?? 14;
+        $port = (int) ($config['port'] ?? 443);
+        $timeout = (float) ($config['timeout'] ?? 10);
+        $warningDays = (int) ($config['warning_days'] ?? 14);
 
         $startTime = microtime(true);
 
@@ -35,6 +35,10 @@ class SslChecker implements CheckerInterface
                     'capture_peer_cert' => true,
                     'verify_peer' => false,
                     'verify_peer_name' => false,
+                    // Send SNI so virtual hosts return their own certificate
+                    // rather than the server's default one.
+                    'SNI_enabled' => true,
+                    'peer_name' => $host,
                 ]
             ]);
 

@@ -8,7 +8,11 @@ services:
     environment:
       APP_ENV: prod
     env_file:
+      # .env is committed and holds placeholders only.
+      # Put your real tokens in .env.local, which is git-ignored.
       - .env
+      - path: .env.local
+        required: false
     volumes:
       - ./var:/app/var                                                  # SQLite database & rotating logs
       - ./config/monitors.yaml:/app/config/monitors.yaml:ro            # Read-only checks config

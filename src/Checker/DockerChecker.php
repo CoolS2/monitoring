@@ -6,6 +6,12 @@ use App\Service\SshExecutor;
 
 class DockerChecker implements CheckerInterface
 {
+    /** Docker CLI is not installed on the target host. */
+    private const EXIT_DOCKER_MISSING = 4;
+
+    /** Docker CLI is present but the daemon could not be queried. */
+    private const EXIT_DOCKER_UNAVAILABLE = 5;
+
     public function __construct(private SshExecutor $sshExecutor) {}
 
     public function supports(string $type): bool
@@ -15,71 +21,95 @@ class DockerChecker implements CheckerInterface
 
     public function check(array $config): CheckOutcome
     {
-        $host = $config['host'] ?? '';
-        $user = $config['user'] ?? 'root';
+        $host = (string) ($config['host'] ?? '');
+        $user = (string) ($config['user'] ?? 'root');
         $port = isset($config['port']) ? (int) $config['port'] : null;
         $maxRestarts = (int) ($config['max_restarts'] ?? 3);
 
-        if (empty($host)) {
+        if ($host === '') {
             return new CheckOutcome(false, 'Missing host for Docker check');
         }
 
         $startTime = microtime(true);
 
-        // Run inspect command to extract status, restart count, and health check state
-        // We append || true to prevent failure in case no containers exist.
-        $cmd = "docker inspect --format '{{.Name}}|{{.State.Status}}|{{.State.RestartCount}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.ExitCode}}' \$(docker ps -aq) 2>/dev/null || true";
+        $result = $this->sshExecutor->run($this->buildCommand(), $host, $user, $port);
 
-        [$success, $output] = $this->sshExecutor->execute($host, $user, $cmd, $port);
         $responseTime = round(microtime(true) - $startTime, 3);
 
-        if (!$success) {
-            return new CheckOutcome(false, sprintf('Failed to retrieve Docker containers: %s', $output), $responseTime);
+        if ($result->isTransportFailure()) {
+            return new CheckOutcome(
+                false,
+                sprintf('Failed to reach Docker host: %s', $result->transportError),
+                $responseTime
+            );
         }
 
-        $output = trim($output);
-        if (empty($output)) {
-            return new CheckOutcome(true, 'OK (No containers found)', $responseTime, ['containers' => []]);
+        if ($result->exitCode === self::EXIT_DOCKER_MISSING) {
+            return new CheckOutcome(false, 'Docker CLI is not installed on the target host', $responseTime);
         }
 
-        $lines = explode("\n", $output);
-        $problematic = [];
+        if ($result->exitCode === self::EXIT_DOCKER_UNAVAILABLE) {
+            return new CheckOutcome(
+                false,
+                sprintf('Docker daemon is not reachable: %s', $result->errorMessage()),
+                $responseTime
+            );
+        }
+
+        if (!$result->isSuccessful()) {
+            return new CheckOutcome(
+                false,
+                sprintf('Failed to retrieve Docker containers: %s', $result->errorMessage()),
+                $responseTime
+            );
+        }
+
+        $output = trim($result->output);
+        if ($output === '') {
+            return new CheckOutcome(true, 'OK (No containers found)', $responseTime, [
+                'total_count'       => 0,
+                'problematic_count' => 0,
+                'containers'        => [],
+                'problematic'       => [],
+            ]);
+        }
+
+        $problematic   = [];
         $allContainers = [];
 
-        foreach ($lines as $line) {
-            $parts = explode('|', trim($line));
+        foreach (preg_split('/\R/', $output) as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+
+            $parts = explode('|', $line);
             if (count($parts) < 5) {
                 continue;
             }
 
-            $name = ltrim($parts[0], '/');
-            $state = $parts[1];
-            $restarts = (int) $parts[2];
-            $health = $parts[3];
-            $exitCode = (int) $parts[4];
-
             $containerInfo = [
-                'name' => $name,
-                'state' => $state,
-                'restarts' => $restarts,
-                'health' => $health,
-                'exit_code' => $exitCode
+                'name'      => ltrim($parts[0], '/'),
+                'state'     => $parts[1],
+                'restarts'  => (int) $parts[2],
+                'health'    => $parts[3],
+                'exit_code' => (int) $parts[4],
             ];
 
             $allContainers[] = $containerInfo;
 
             $issues = [];
-            if ($health === 'unhealthy') {
+            if ($containerInfo['health'] === 'unhealthy') {
                 $issues[] = 'unhealthy';
             }
-            if ($state === 'restarting') {
+            if ($containerInfo['state'] === 'restarting') {
                 $issues[] = 'continually restarting';
             }
-            if ($restarts > $maxRestarts) {
-                $issues[] = sprintf('high restart count (%d > %d)', $restarts, $maxRestarts);
+            if ($containerInfo['restarts'] > $maxRestarts) {
+                $issues[] = sprintf('high restart count (%d > %d)', $containerInfo['restarts'], $maxRestarts);
             }
-            if ($state === 'exited' && $exitCode !== 0) {
-                $issues[] = sprintf('exited with error code %d', $exitCode);
+            if ($containerInfo['state'] === 'exited' && $containerInfo['exit_code'] !== 0) {
+                $issues[] = sprintf('exited with error code %d', $containerInfo['exit_code']);
             }
 
             if (!empty($issues)) {
@@ -89,14 +119,18 @@ class DockerChecker implements CheckerInterface
         }
 
         $extra = [
-            'total_count' => count($allContainers),
+            'total_count'       => count($allContainers),
             'problematic_count' => count($problematic),
-            'containers' => $allContainers,
-            'problematic' => $problematic
+            'containers'        => $allContainers,
+            'problematic'       => $problematic,
         ];
 
         if (!empty($problematic)) {
-            $problemNames = array_map(fn($c) => sprintf('%s (%s)', $c['name'], $c['issues']), $problematic);
+            $problemNames = array_map(
+                static fn (array $c): string => sprintf('%s (%s)', $c['name'], $c['issues']),
+                $problematic
+            );
+
             return new CheckOutcome(
                 false,
                 sprintf('Problematic containers detected: %s', implode('; ', $problemNames)),
@@ -111,5 +145,24 @@ class DockerChecker implements CheckerInterface
             $responseTime,
             $extra
         );
+    }
+
+    /**
+     * Remote snippet listing every container with its state, restart count,
+     * health status and exit code — one container per line, pipe separated.
+     *
+     * Distinct exit codes are used so a missing Docker CLI or an unreachable
+     * daemon is reported as such instead of looking like "no containers".
+     */
+    private function buildCommand(): string
+    {
+        $format = '{{.Name}}|{{.State.Status}}|{{.State.RestartCount}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.ExitCode}}';
+
+        return implode(' ', [
+            sprintf('command -v docker >/dev/null 2>&1 || exit %d;', self::EXIT_DOCKER_MISSING),
+            sprintf('ids=$(docker ps -aq) || exit %d;', self::EXIT_DOCKER_UNAVAILABLE),
+            '[ -z "$ids" ] && exit 0;',
+            sprintf("docker inspect --format '%s' \$ids", $format),
+        ]);
     }
 }

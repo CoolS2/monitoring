@@ -7,6 +7,7 @@ use Symfony\Component\Uid\Uuid;
 
 #[ORM\Entity]
 #[ORM\Table(name: 'llm_analyses')]
+#[ORM\Index(columns: ['check_error_id'], name: 'idx_llm_analyses_check_error_id')]
 class LLMAnalysis
 {
     #[ORM\Id]
@@ -23,10 +24,11 @@ class LLMAnalysis
     #[ORM\Column(type: 'text')]
     private string $rawResponse;
 
-    #[ORM\Column(type: 'string', length: 255)]
+    // Free-form model output; length is not something we can bound up front.
+    #[ORM\Column(type: 'text')]
     private string $summary;
 
-    #[ORM\Column(type: 'string', length: 255)]
+    #[ORM\Column(type: 'text')]
     private string $probableCause;
 
     #[ORM\Column(type: 'string', length: 50)]

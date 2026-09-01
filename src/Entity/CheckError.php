@@ -18,7 +18,9 @@ class CheckError
     #[ORM\Column(type: 'string', length: 255)]
     private string $checkKey;
 
-    #[ORM\Column(type: 'string', length: 255)]
+    // Check messages routinely exceed 255 characters (container lists, SSH
+    // errors, aggregated log counts), so they are stored as text.
+    #[ORM\Column(type: 'text')]
     private string $message;
 
     #[ORM\Column(type: 'text', nullable: true)]

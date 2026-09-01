@@ -27,3 +27,6 @@
 /phpunit.xml
 /.phpunit.cache/
 ###< phpunit/phpunit ###
+
+# Symfony config reference dumped by lint:container
+/config/reference.php
