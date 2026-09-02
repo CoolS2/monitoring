@@ -32,11 +32,13 @@ php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migratio
 # digest built from the `script` checks. Set it to "off" to disable.
 SERVER_REPORT_SCHEDULE="${SERVER_REPORT_SCHEDULE:-0 * * * *}"
 
+# DAILY_SUMMARY_SCHEDULE controls the "last 24 hours" recap. Set it to "off"
+# to disable.
+DAILY_SUMMARY_SCHEDULE="${DAILY_SUMMARY_SCHEDULE:-0 22 * * *}"
+
 cat > /etc/crontabs/root <<EOF
 # Run due monitor checks every minute
 * * * * * cd /app && APP_ENV=prod php bin/console app:monitor:run >> /app/var/cron.log 2>&1
-# Daily monitoring summary at 23:59
-59 23 * * * cd /app && APP_ENV=prod php bin/console app:monitor:daily-summary >> /app/var/cron.log 2>&1
 # Weekly hard purge: rotated logs older than 7 days, plus the cron log itself
 0 3 * * 0 find /app/var/log -type f -name "*.log" -mtime +7 -delete >> /app/var/cron.log 2>&1
 5 3 * * 0 : > /app/var/cron.log
@@ -46,6 +48,13 @@ if [ "${SERVER_REPORT_SCHEDULE}" != "off" ]; then
     cat >> /etc/crontabs/root <<EOF
 # Periodic server health digest sent to Telegram
 ${SERVER_REPORT_SCHEDULE} cd /app && APP_ENV=prod php bin/console app:monitor:report >> /app/var/cron.log 2>&1
+EOF
+fi
+
+if [ "${DAILY_SUMMARY_SCHEDULE}" != "off" ]; then
+    cat >> /etc/crontabs/root <<EOF
+# Daily monitoring summary
+${DAILY_SUMMARY_SCHEDULE} cd /app && APP_ENV=prod php bin/console app:monitor:daily-summary >> /app/var/cron.log 2>&1
 EOF
 fi
 

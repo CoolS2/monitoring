@@ -192,7 +192,7 @@ services:
 | `APP_SECRET` | generated | Symfony secret. The entrypoint writes one into `.env.local` on first boot if it is empty |
 | `TELEGRAM_TOKEN` | — | **Required.** Bot token from [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHAT_ID` | — | **Required.** Target chat, group or channel ID |
-| `LLM_ENDPOINT` | `http://host.docker.internal:11434/v1` | OpenAI-compatible base URL. `/chat/completions` is appended |
+| `LLM_ENDPOINT` | `http://host.docker.internal:11434/v1` | OpenAI-compatible base URL. `/chat/completions` is appended. **Leave it empty to switch the analyzer off** — alerts are then sent without the diagnostics block |
 | `LLM_MODEL` | `llama3` | Model name passed to the runtime |
 | `LLM_TIMEOUT` | `30` | Idle timeout in seconds. The whole exchange is capped at 3× this value |
 | `LLM_LANGUAGE` | `Russian` | Language the model must answer in — e.g. `English`, `Russian`, `German` |
@@ -202,6 +202,7 @@ services:
 | `DATABASE_URL` | `sqlite:///%kernel.project_dir%/var/data.db` | Doctrine DSN. Resolves to `/app/var/data.db` in the container |
 | `NOTIFICATION_COOLDOWN` | `60` | Minutes between reminders about an *already open* incident. New outages ignore it |
 | `SERVER_REPORT_SCHEDULE` | `0 * * * *` | Cron expression for the periodic digest, or `off` to disable. **Quote it** — a value containing spaces must be written as `"0 * * * *"` |
+| `DAILY_SUMMARY_SCHEDULE` | `0 22 * * *` | Cron expression for the daily 24h recap, or `off` to disable. **Quote it** as well |
 | `DEFAULT_URI` | `http://localhost` | Base URI used when generating URLs from the CLI |
 
 ---
@@ -885,7 +886,7 @@ php bin/console app:monitor:report --dry-run            # print, don't send
 ### `app:monitor:daily-summary`
 
 Compiles the last 24 hours — total runs, success rate, and which checks failed — and posts
-it to Telegram.
+it to Telegram. In the container it runs on the `DAILY_SUMMARY_SCHEDULE` cron (22:00 by default).
 
 ```bash
 php bin/console app:monitor:daily-summary
@@ -901,14 +902,16 @@ The container writes its crontab on every boot, so restarting never duplicates e
 |---|---|
 | `* * * * *` | `app:monitor:run` — run due checks |
 | `${SERVER_REPORT_SCHEDULE}` (default hourly) | `app:monitor:report` — server digest |
-| `59 23 * * *` | `app:monitor:daily-summary` |
+| `${DAILY_SUMMARY_SCHEDULE}` (default `0 22 * * *`) | `app:monitor:daily-summary` |
 | `0 3 * * 0` | Delete rotated log files older than 7 days |
 | `5 3 * * 0` | Truncate `var/cron.log` |
 
-Disable the digest with `SERVER_REPORT_SCHEDULE=off`, or change its cadence:
+Disable a job with `off`, or change its cadence:
 
 ```env
-SERVER_REPORT_SCHEDULE="0 */6 * * *"   # every six hours
+SERVER_REPORT_SCHEDULE="0 */6 * * *"   # digest every six hours
+DAILY_SUMMARY_SCHEDULE="30 23 * * *"   # daily recap at 23:30
+DAILY_SUMMARY_SCHEDULE="off"           # no daily recap at all
 ```
 
 Cron output lands in `var/cron.log`.
@@ -974,7 +977,7 @@ Add the schedule to your own crontab:
 ```cron
 * * * * *  cd /path/to/monitoring && php bin/console app:monitor:run  >> var/cron.log 2>&1
 0 * * * *  cd /path/to/monitoring && php bin/console app:monitor:report >> var/cron.log 2>&1
-59 23 * * * cd /path/to/monitoring && php bin/console app:monitor:daily-summary >> var/cron.log 2>&1
+0 22 * * * cd /path/to/monitoring && php bin/console app:monitor:daily-summary >> var/cron.log 2>&1
 ```
 
 Installing the service directly on the monitored machine lets you drop `host:` from your

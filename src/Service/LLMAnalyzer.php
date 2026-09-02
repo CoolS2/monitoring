@@ -35,11 +35,25 @@ class LLMAnalyzer
      * Never throws: when the LLM is unreachable or answers with garbage a
      * fallback diagnosis is returned so alerting keeps working.
      *
-     * @return array{success: bool, prompt: string, raw_response: string, summary: string,
-     *               probable_cause: string, severity: string, recommendations: list<string>}
+     * When no endpoint is configured the analyzer is considered switched off: the
+     * call returns quietly without `summary`/`severity`, so `renderAnalysis()`
+     * appends no diagnostics block at all.
+     *
+     * @return array{success: bool, prompt: string, raw_response: string, summary?: string,
+     *               probable_cause: string, severity?: string, recommendations: list<string>}
      */
     public function analyze(string $checkKey, string $type, string $message, ?string $details = null): array
     {
+        if (trim($this->endpoint) === '') {
+            return [
+                'success'         => false,
+                'prompt'          => '',
+                'raw_response'    => '',
+                'probable_cause'  => '',
+                'recommendations' => [],
+            ];
+        }
+
         $url    = rtrim($this->endpoint, '/') . '/chat/completions';
         $prompt = $this->buildPrompt($checkKey, $type, $message, $details);
 

@@ -224,6 +224,28 @@ class LLMAnalyzerTest extends TestCase
         $this->assertArrayNotHasKey('response_format', $payloads[1]);
     }
 
+    public function testAnalyzeIsSkippedWhenEndpointIsEmpty(): void
+    {
+        $mockClient = $this->createMock(HttpClientInterface::class);
+        $mockClient->expects($this->never())->method('request');
+
+        $analyzer = new LLMAnalyzer(
+            $mockClient,
+            $this->createMock(LoggerInterface::class),
+            '  ',
+            'llama3',
+            45
+        );
+
+        $result = $analyzer->analyze('test_key', 'http', 'Connection timeout');
+
+        $this->assertFalse($result['success']);
+        // No 'summary' key means TelegramNotifier renders no diagnostics block.
+        $this->assertArrayNotHasKey('summary', $result);
+        $this->assertArrayNotHasKey('severity', $result);
+        $this->assertSame([], $result['recommendations']);
+    }
+
     private function analyzerReturning(string $content): LLMAnalyzer
     {
         $mockResponse = $this->createMock(ResponseInterface::class);
