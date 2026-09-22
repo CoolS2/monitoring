@@ -41,13 +41,22 @@ class OutputRuleEvaluator
     /**
      * @param iterable<mixed> $rules Rule definitions straight from monitors.yaml
      *
-     * @return array{status: string, findings: list<array{name: string, status: string, message: string}>}
+     * @return array{
+     *     status: string,
+     *     findings: list<array{name: string, status: string, message: string}>,
+     *     measurements: list<array{name: string, status: string, value: string}>
+     * }
+     *
+     * `findings` holds only the rules that breached a threshold — that is what
+     * turns into an alert. `measurements` holds what every rule read, breach or
+     * not, so a report can print the numbers on a healthy day too.
      */
     public function evaluate(iterable $rules, string $text): array
     {
-        $status   = Status::OK;
-        $findings = [];
-        $index    = 0;
+        $status       = Status::OK;
+        $findings     = [];
+        $measurements = [];
+        $index        = 0;
 
         foreach ($rules as $rule) {
             $index++;
@@ -62,23 +71,30 @@ class OutputRuleEvaluator
             }
 
             $name    = trim((string) ($rule['name'] ?? sprintf('rule #%d', $index)));
-            $finding = $this->applyRule($name, $pattern, $rule, $text);
+            $reading = $this->applyRule($name, $pattern, $rule, $text);
 
-            if ($finding !== null) {
-                $findings[] = $finding;
-                $status     = Status::worse($status, $finding['status']);
+            if ($reading['measurement'] !== null) {
+                $measurements[] = $reading['measurement'];
+            }
+
+            if ($reading['finding'] !== null) {
+                $findings[] = $reading['finding'];
+                $status     = Status::worse($status, $reading['finding']['status']);
             }
         }
 
-        return ['status' => $status, 'findings' => $findings];
+        return ['status' => $status, 'findings' => $findings, 'measurements' => $measurements];
     }
 
     /**
      * @param array<string, mixed> $rule
      *
-     * @return array{name: string, status: string, message: string}|null
+     * @return array{
+     *     finding: array{name: string, status: string, message: string}|null,
+     *     measurement: array{name: string, status: string, value: string}|null
+     * }
      */
-    private function applyRule(string $name, string $pattern, array $rule, string $text): ?array
+    private function applyRule(string $name, string $pattern, array $rule, string $text): array
     {
         $regex = $this->compile($pattern, (bool) ($rule['ignore_case'] ?? true));
 
@@ -88,7 +104,10 @@ class OutputRuleEvaluator
         $count = @preg_match_all($regex, $text, $matches);
 
         if ($count === false) {
-            return $this->finding($name, Status::ERROR, sprintf('%s: invalid pattern %s', $name, $pattern));
+            return $this->reading(
+                $this->finding($name, Status::ERROR, sprintf('%s: invalid pattern %s', $name, $pattern)),
+                null
+            );
         }
 
         $mode = strtolower(trim((string) ($rule['value'] ?? '')));
@@ -96,8 +115,13 @@ class OutputRuleEvaluator
             $mode = count($matches) > 1 ? 'capture' : 'count';
         }
 
+        $unit = (string) ($rule['unit'] ?? '');
+
         if ($mode === 'count') {
-            return $this->judge($name, (float) $count, $rule, sprintf('%d matching line(s)', $count));
+            $rendered = $count . $unit;
+            $finding  = $this->judge($name, (float) $count, $rule, $rendered);
+
+            return $this->reading($finding, $this->measurement($name, $finding, $rendered));
         }
 
         $values = [];
@@ -114,20 +138,48 @@ class OutputRuleEvaluator
             // explicitly says what a missing measurement means.
             $onMissing = strtoupper(trim((string) ($rule['on_missing'] ?? '')));
             if ($onMissing === '') {
-                return null;
+                return $this->reading(null, null);
             }
 
-            return $this->finding(
-                $name,
-                $onMissing,
-                sprintf('%s: nothing matched %s', $name, $pattern)
+            return $this->reading(
+                $this->finding($name, $onMissing, sprintf('%s: nothing matched %s', $name, $pattern)),
+                null
             );
         }
 
-        $value = $this->aggregate($values, $rule);
-        $unit  = (string) ($rule['unit'] ?? '');
+        $value    = $this->aggregate($values, $rule);
+        $rendered = $this->format($value) . $unit;
+        $finding  = $this->judge($name, $value, $rule, $rendered);
 
-        return $this->judge($name, $value, $rule, $this->format($value) . $unit);
+        return $this->reading($finding, $this->measurement($name, $finding, $rendered));
+    }
+
+    /**
+     * @param array{name: string, status: string, message: string}|null    $finding
+     * @param array{name: string, status: string, value: string}|null      $measurement
+     *
+     * @return array{finding: array|null, measurement: array|null}
+     */
+    private function reading(?array $finding, ?array $measurement): array
+    {
+        return ['finding' => $finding, 'measurement' => $measurement];
+    }
+
+    /**
+     * A rule that stayed inside its thresholds still measured something; the
+     * measurement inherits the verdict so a report can colour it.
+     *
+     * @param array{name: string, status: string, message: string}|null $finding
+     *
+     * @return array{name: string, status: string, value: string}
+     */
+    private function measurement(string $name, ?array $finding, string $rendered): array
+    {
+        return [
+            'name'   => $name,
+            'status' => $finding['status'] ?? Status::OK,
+            'value'  => $rendered,
+        ];
     }
 
     /**
@@ -146,7 +198,7 @@ class OutputRuleEvaluator
             $above = $rule[$prefix . '_above'] ?? null;
             if (is_numeric($above) && $value > (float) $above) {
                 return $this->finding($name, $status, sprintf(
-                    '%s: %s (above %s%s)',
+                    '%s: %s (> %s%s)',
                     $name,
                     $rendered,
                     $this->format((float) $above),
@@ -157,7 +209,7 @@ class OutputRuleEvaluator
             $below = $rule[$prefix . '_below'] ?? null;
             if (is_numeric($below) && $value < (float) $below) {
                 return $this->finding($name, $status, sprintf(
-                    '%s: %s (below %s%s)',
+                    '%s: %s (< %s%s)',
                     $name,
                     $rendered,
                     $this->format((float) $below),

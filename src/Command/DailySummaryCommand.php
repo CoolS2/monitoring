@@ -28,55 +28,68 @@ class DailySummaryCommand extends Command
     {
         $since = new \DateTimeImmutable('-24 hours');
 
-        // Query total check runs in the last 24 hours
-        $totalRuns = (int) $this->entityManager->createQueryBuilder()
-            ->select('COUNT(r.id)')
+        // One pass per check key: how often it ran, how often it was healthy,
+        // and how slow it was. The totals are derived from these rows so the
+        // headline figure and the per-check lines can never disagree.
+        $rows = $this->entityManager->createQueryBuilder()
+            ->select(
+                'r.checkKey AS checkKey',
+                'COUNT(r.id) AS total',
+                'SUM(CASE WHEN r.success = true THEN 1 ELSE 0 END) AS okCount',
+                'AVG(r.responseTime) AS avgTime',
+                'MAX(r.responseTime) AS maxTime'
+            )
             ->from(CheckResult::class, 'r')
             ->where('r.createdAt >= :since')
+            ->groupBy('r.checkKey')
+            ->orderBy('r.checkKey', 'ASC')
             ->setParameter('since', $since)
             ->getQuery()
-            ->getSingleScalarResult();
+            ->getResult();
+
+        $totalRuns   = 0;
+        $successRuns = 0;
+        $checks      = [];
+        $failedKeys  = [];
+
+        foreach ($rows as $row) {
+            $key   = (string) $row['checkKey'];
+            $total = (int) $row['total'];
+            $ok    = (int) $row['okCount'];
+
+            $totalRuns   += $total;
+            $successRuns += $ok;
+
+            if ($ok < $total) {
+                $failedKeys[$key] = $total - $ok;
+            }
+
+            $checks[] = [
+                'key'      => $key,
+                'total'    => $total,
+                'ok'       => $ok,
+                'failed'   => $total - $ok,
+                'uptime'   => $total > 0 ? round($ok * 100 / $total, 1) : 0.0,
+                'avg_time' => $row['avgTime'] !== null ? round((float) $row['avgTime'], 2) : null,
+                'max_time' => $row['maxTime'] !== null ? round((float) $row['maxTime'], 2) : null,
+            ];
+        }
 
         if ($totalRuns === 0) {
             $output->writeln('No monitoring runs recorded in the last 24 hours. Skipping summary.');
             return Command::SUCCESS;
         }
 
-        // Query successful runs
-        $successRuns = (int) $this->entityManager->createQueryBuilder()
-            ->select('COUNT(r.id)')
-            ->from(CheckResult::class, 'r')
-            ->where('r.createdAt >= :since')
-            ->andWhere('r.success = true')
-            ->setParameter('since', $since)
-            ->getQuery()
-            ->getSingleScalarResult();
-
-        $failedRuns = $totalRuns - $successRuns;
+        $failedRuns  = $totalRuns - $successRuns;
         $successRate = (int) round(($successRuns / $totalRuns) * 100);
 
-        // Query check keys that failed in the last 24 hours and their failure counts
-        $failedRows = $this->entityManager->createQueryBuilder()
-            ->select('r.checkKey, COUNT(r.id) as failCount')
-            ->from(CheckResult::class, 'r')
-            ->where('r.createdAt >= :since')
-            ->andWhere('r.success = false')
-            ->groupBy('r.checkKey')
-            ->setParameter('since', $since)
-            ->getQuery()
-            ->getResult();
-
-        $failedKeys = [];
-        foreach ($failedRows as $row) {
-            $failedKeys[$row['checkKey']] = (int) $row['failCount'];
-        }
-
         $stats = [
-            'total_runs' => $totalRuns,
+            'total_runs'   => $totalRuns,
             'success_runs' => $successRuns,
-            'failed_runs' => $failedRuns,
+            'failed_runs'  => $failedRuns,
             'success_rate' => $successRate,
-            'failed_keys' => $failedKeys
+            'failed_keys'  => $failedKeys,
+            'checks'       => $checks,
         ];
 
         // Send Daily summary report

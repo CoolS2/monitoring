@@ -2,6 +2,7 @@
 
 namespace App\Alert;
 
+use App\Checker\Status;
 use App\Config\TelegramConfig;
 use Psr\Log\LoggerInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
@@ -77,9 +78,9 @@ class TelegramNotifier
         $severity = $llmAnalysis['severity'] ?? 'HIGH';
 
         $html = sprintf(
-            "%s <b>Check Failed: %s</b>\n\n" .
-            "<b>Type:</b> %s\n" .
-            "<b>Error:</b> <code>%s</code>\n",
+            "%s <b>Проверка не прошла: %s</b>\n\n" .
+            "<b>Тип:</b> %s\n" .
+            "<b>Ошибка:</b> <code>%s</code>\n",
             $this->severityEmoji($severity),
             $this->escape($checkKey),
             $this->escape(strtoupper($type)),
@@ -87,10 +88,10 @@ class TelegramNotifier
         );
 
         if ($responseTime !== null) {
-            $html .= sprintf("<b>Response Time:</b> %.3f sec\n", $responseTime);
+            $html .= sprintf("<b>Время отклика:</b> %.3f с\n", $responseTime);
         }
 
-        $html .= sprintf("<b>Time:</b> %s\n", $this->now());
+        $html .= sprintf("<b>Время:</b> %s\n", $this->now());
         $html .= $this->renderAnalysis($llmAnalysis, $severity);
 
         $this->send(trim($html));
@@ -102,67 +103,86 @@ class TelegramNotifier
     public function sendRecovery(string $checkKey, string $type, ?float $downtimeMinutes = null): void
     {
         $html = sprintf(
-            "✅ <b>Service Restored: %s</b>\n\n" .
-            "<b>Type:</b> %s\n" .
-            "<b>Status:</b> Success (OK)\n" .
-            "<b>Time:</b> %s\n",
+            "✅ <b>Снова работает: %s</b>\n\n" .
+            "<b>Тип:</b> %s\n" .
+            "<b>Статус:</b> OK\n" .
+            "<b>Время:</b> %s\n",
             $this->escape($checkKey),
             $this->escape(strtoupper($type)),
             $this->now()
         );
 
         if ($downtimeMinutes !== null) {
-            $html .= sprintf("<b>Downtime Duration:</b> %.1f min\n", $downtimeMinutes);
+            $html .= sprintf("<b>Простой:</b> %.1f мин\n", $downtimeMinutes);
         }
 
         $this->send($html);
     }
 
     /**
-     * Sends a compact digest for a server health report: the per-section
-     * statuses plus the LLM's short analysis of what they mean.
+     * Sends the server health digest: one block per section, carrying both the
+     * section's verdict and every number its rules measured.
+     *
+     * The measurements are the point of the message — a digest that only says
+     * "OK" is not worth the notification, so the values are printed whether or
+     * not they breached a threshold, and breaches are repeated up top.
      *
      * @param array<string, string> $statuses Section label => reported status
      * @param list<string>          $findings Threshold breaches detected in the output
+     * @param list<array{section?: string, name: string, status: string, value: string}> $metrics
      */
     public function sendServerReport(
         string $title,
         string $worstStatus,
         array $statuses,
         array $findings = [],
+        array $metrics = [],
         ?array $llmAnalysis = null
     ): void {
         $severity = $llmAnalysis['severity'] ?? ($worstStatus === 'OK' ? 'LOW' : 'MEDIUM');
 
         $html = sprintf(
-            "%s <b>Server Report: %s</b>\n\n<b>Overall:</b> <code>%s</code>\n<b>Time:</b> %s\n",
+            "%s <b>Отчёт по серверу: %s</b>\n<b>Итог:</b> <code>%s</code>\n<b>Время:</b> %s\n",
             $this->statusEmoji($worstStatus),
             $this->escape($title),
             $this->escape($worstStatus),
             $this->now()
         );
 
-        if (!empty($statuses)) {
-            $html .= "\n<b>Sections:</b>\n";
-            foreach ($statuses as $label => $status) {
-                $html .= sprintf(
-                    "%s <code>%s</code> — %s\n",
-                    $this->statusEmoji((string) $status),
-                    $this->escape((string) $label),
-                    $this->escape((string) $status)
-                );
-            }
-        }
-
         if (!empty($findings)) {
-            $html .= "\n<b>Detected issues:</b>\n";
+            $html .= "\n⚠️ <b>Требует внимания:</b>\n";
             foreach (array_slice($findings, 0, self::MAX_FINDINGS) as $finding) {
                 $html .= sprintf("• %s\n", $this->escape((string) $finding));
             }
 
             $remaining = count($findings) - self::MAX_FINDINGS;
             if ($remaining > 0) {
-                $html .= sprintf("<i>…and %d more</i>\n", $remaining);
+                $html .= sprintf("<i>…и ещё %d</i>\n", $remaining);
+            }
+        }
+
+        $bySection = [];
+        foreach ($metrics as $metric) {
+            $bySection[(string) ($metric['section'] ?? '')][] = $metric;
+        }
+
+        foreach ($statuses as $label => $status) {
+            $label = (string) $label;
+
+            $html .= sprintf(
+                "\n%s <b>%s</b> — <code>%s</code>\n",
+                $this->statusEmoji((string) $status),
+                $this->escape($label),
+                $this->escape((string) $status)
+            );
+
+            foreach ($bySection[$label] ?? [] as $metric) {
+                $html .= sprintf(
+                    "%s %s: <b>%s</b>\n",
+                    $this->statusEmoji((string) ($metric['status'] ?? Status::OK)),
+                    $this->escape((string) $metric['name']),
+                    $this->escape((string) $metric['value'])
+                );
             }
         }
 
@@ -172,26 +192,62 @@ class TelegramNotifier
     }
 
     /**
-     * Sends the daily compiled metrics report.
+     * Sends the 24-hour recap: how each check behaved, not just how many times
+     * something ran.
+     *
+     * @param array{
+     *     total_runs?: int, success_runs?: int, failed_runs?: int, success_rate?: int,
+     *     failed_keys?: array<string, int>,
+     *     checks?: list<array{key: string, total: int, ok: int, failed: int, uptime: float, avg_time: ?float, max_time: ?float}>
+     * } $stats
      */
     public function sendDailySummary(array $stats): void
     {
-        $html = "📊 <b>Daily Monitoring Report Summary</b>\n" .
-            sprintf("<i>Compiled at: %s</i>\n\n", $this->now()) .
-            sprintf("• <b>Total check runs:</b> %d\n", $stats['total_runs'] ?? 0) .
-            sprintf("• <b>Successful runs:</b> %d (%d%%)\n", $stats['success_runs'] ?? 0, $stats['success_rate'] ?? 0) .
-            sprintf("• <b>Total failures logged:</b> %d\n", $stats['failed_runs'] ?? 0);
+        $html = "📊 <b>Итоги за 24 часа</b>\n" .
+            sprintf("<i>%s</i>\n\n", $this->now()) .
+            sprintf(
+                "Проверок: <b>%d</b> · сбоев: <b>%d</b> · успешность: <b>%d%%</b>\n",
+                $stats['total_runs'] ?? 0,
+                $stats['failed_runs'] ?? 0,
+                $stats['success_rate'] ?? 0
+            );
 
-        if (!empty($stats['failed_keys'])) {
-            $html .= "\n⚠️ <b>Incident list (checks that failed at least once):</b>\n";
-            foreach ($stats['failed_keys'] as $key => $failCount) {
-                $html .= sprintf("• <code>%s</code>: failed %d times\n", $this->escape((string) $key), $failCount);
+        foreach ($stats['checks'] ?? [] as $check) {
+            $html .= sprintf(
+                "\n%s <code>%s</code> — доступность <b>%s%%</b> (%d из %d)\n",
+                ($check['failed'] ?? 0) > 0 ? '⚠️' : '✅',
+                $this->escape((string) $check['key']),
+                $this->formatNumber((float) ($check['uptime'] ?? 0)),
+                $check['ok'] ?? 0,
+                $check['total'] ?? 0
+            );
+
+            if (($check['avg_time'] ?? null) !== null) {
+                $html .= sprintf(
+                    "отклик: сред. %s с · макс. %s с\n",
+                    $this->formatNumber((float) $check['avg_time']),
+                    $this->formatNumber((float) ($check['max_time'] ?? $check['avg_time']))
+                );
             }
-        } else {
-            $html .= "\n🎉 <b>All services were 100% healthy today!</b>\n";
+        }
+
+        if (empty($stats['failed_keys'])) {
+            $html .= "\n🎉 <b>За сутки ни одного сбоя.</b>\n";
         }
 
         $this->send($html);
+    }
+
+    /**
+     * Prints a measurement without trailing zeros: 100 stays 100, 99.8 stays 99.8.
+     */
+    private function formatNumber(float $value): string
+    {
+        if (abs($value - round($value)) < 0.0001) {
+            return (string) (int) round($value);
+        }
+
+        return rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.');
     }
 
     /**

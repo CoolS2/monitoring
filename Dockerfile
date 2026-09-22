@@ -4,6 +4,7 @@ FROM php:8.4-cli-alpine
 RUN apk add --no-cache \
     openssh-client \
     busybox-suid \
+    tzdata \
     git \
     unzip \
     sqlite-dev \

@@ -17,6 +17,14 @@ if [ -z "${APP_SECRET}" ] || [ "${APP_SECRET}" = "change_me" ]; then
     export APP_SECRET
 fi
 
+# ── Timezone ──────────────────────────────────────────────────────────────────
+# TZ decides when the cron schedules below actually fire. PHP ignores the
+# environment variable, so the same zone is written into a php.ini fragment —
+# without it every timestamp in a Telegram message would read as UTC.
+if [ -n "${TZ}" ]; then
+    printf 'date.timezone=%s\n' "${TZ}" > /usr/local/etc/php/conf.d/timezone.ini
+fi
+
 # ── Storage ───────────────────────────────────────────────────────────────────
 mkdir -p /app/var/log
 chmod -R 777 /app/var

@@ -102,6 +102,23 @@ class ScriptCheckerTest extends TestCase
     }
 
     /**
+     * monitor-logs mirrors its verdict in the exit code (1 = WARN, 2 =
+     * CRITICAL). The banner is the authority; the exit code must not push the
+     * same warning up to ERROR on top of it.
+     */
+    public function testSelfGradedScriptKeepsItsOwnVerdictDespiteExitCode(): void
+    {
+        $local = $this->createMock(LocalExecutor::class);
+        $local->method('run')->willReturn(new CommandResult(1, self::LOG_REPORT_WARN));
+
+        $outcome = $this->checker($this->createMock(SshExecutor::class), $local)
+            ->check(['command' => '/usr/local/sbin/monitor-logs', 'label' => 'LOGS']);
+
+        $this->assertSame('WARN', $outcome->extra['worst_status']);
+        $this->assertSame(['LOGS' => 'WARN'], $outcome->extra['statuses']);
+    }
+
+    /**
      * A script with no STATUS banner is judged by its exit code alone.
      */
     public function testNonZeroExitWithoutStatusBannerFails(): void
@@ -203,7 +220,7 @@ class ScriptCheckerTest extends TestCase
         $this->assertFalse($outcome->success);
         $this->assertSame('CRIT', $outcome->extra['worst_status']);
         $this->assertSame(['SYSTEM' => 'CRIT'], $outcome->extra['statuses']);
-        $this->assertSame(['[SYSTEM] Disk usage /: 96% (above 90%)'], $outcome->extra['findings']);
+        $this->assertSame(['[SYSTEM] Disk usage /: 96% (> 90%)'], $outcome->extra['findings']);
         $this->assertStringContainsString('Disk usage /', $outcome->message);
 
         // The findings lead the report so the model weighs them first
@@ -256,7 +273,7 @@ class ScriptCheckerTest extends TestCase
 
         // 60 matches counted, even though only 10 lines are kept
         $this->assertSame('CRIT', $outcome->extra['worst_status']);
-        $this->assertSame(['[PM2_LOGS] Fatal: 60 matching line(s) (above 50)'], $outcome->extra['findings']);
+        $this->assertSame(['[PM2_LOGS] Fatal: 60 (> 50)'], $outcome->extra['findings']);
 
         $this->assertStringContainsString('50 earlier line(s) omitted', $outcome->extra['output']);
         $this->assertStringNotContainsString('line 1 ECONNREFUSED', $outcome->extra['output']);
