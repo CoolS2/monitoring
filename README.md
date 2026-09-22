@@ -161,9 +161,11 @@ services:
     container_name: monitoring_app
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # Localhost only — the API has no authentication. See the warning below.
+      - "127.0.0.1:8000:8000"
     environment:
       APP_ENV: prod
+      TZ: ${TZ:-UTC}        # decides when the scheduled digests actually fire
     env_file:
       # .env is committed and holds placeholders only.
       # Put your real tokens in .env.local, which is git-ignored.
@@ -173,10 +175,17 @@ services:
     volumes:
       - ./var:/app/var                                                  # SQLite database & rotating logs
       - ./config/monitors.yaml:/app/config/monitors.yaml:ro             # Read-only checks config
-      - ${SSH_PRIVATE_KEY_PATH:-/root/.ssh/id_rsa}:/root/.ssh/id_rsa:ro # Read-only SSH private key
+      - ${SSH_PRIVATE_KEY_PATH:-./secrets/monitoring_ed25519}:/root/.ssh/id_rsa:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"                             # Reach an LLM bound to the host
 ```
+
+> **The REST API is unauthenticated.** Anyone who can reach the published port can
+> read `/api/checks`, `/api/checks/{key}` and `/api/errors`, which return the stored
+> `extra` and `details` fields verbatim — that is, whatever your diagnostic scripts
+> printed. Publish it on `127.0.0.1` and reach it through `ssh -L 8000:127.0.0.1:8000`,
+> or put an authenticating reverse proxy in front. Binding it to `0.0.0.0` publishes
+> your servers' diagnostics, and any secret a script let slip, to whoever asks.
 
 > The optional `.env.local` entry needs Docker Compose 2.24+. On an older Compose, drop
 > those two lines and put your real values straight into `.env` — but then keep `.env` out
@@ -197,7 +206,7 @@ services:
 | `LLM_TIMEOUT` | `30` | Idle timeout in seconds. The whole exchange is capped at 3× this value |
 | `LLM_LANGUAGE` | `Russian` | Language the model must answer in — e.g. `English`, `Russian`, `German` |
 | `LLM_MAX_CONTEXT_CHARS` | `6000` | Log context is clamped to this size. The head (status banner) and the tail (freshest lines) are kept, the middle is dropped |
-| `SSH_PRIVATE_KEY_PATH` | `/root/.ssh/id_rsa` | Private key used by the `ssh_log`, `docker` and remote `script` checks |
+| `SSH_PRIVATE_KEY_PATH` | `./secrets/monitoring_ed25519` | Private key used by the `ssh_log`, `docker` and remote `script` checks. Give it a key of its own, authorised for an unprivileged account — never a personal key with root access |
 | `SSH_TIMEOUT` | `10` | SSH connect/run timeout in seconds; individual checks can override it |
 | `DATABASE_URL` | `sqlite:///%kernel.project_dir%/var/data.db` | Doctrine DSN. Resolves to `/app/var/data.db` in the container |
 | `NOTIFICATION_COOLDOWN` | `60` | Minutes between reminders about an *already open* incident. New outages ignore it |
@@ -628,14 +637,77 @@ Point the service at it and mount it read-only:
 SSH_PRIVATE_KEY_PATH=/home/youruser/.ssh/monitoring_ed25519
 ```
 
-Restrict what that key may do by pinning it to a single command in the server's
-`~/.ssh/authorized_keys`:
+Restrict what that key may do, in the server's `~/.ssh/authorized_keys`:
+
+```
+restrict,no-pty ssh-ed25519 AAAA... monitoring
+```
+
+`restrict` turns off port and agent forwarding, X11 and the rest; the sudoers
+allowlist in the next step is what bounds the commands. If every collection fits
+into one script, you can go further and pin the key to it — but then a `commands:`
+map with several entries no longer works, since every one of them would run that
+same script:
 
 ```
 command="/usr/local/sbin/monitor-run-all",restrict ssh-ed25519 AAAA... monitoring
 ```
 
-### 3. Let the monitoring user run the scripts
+Log in by hand once and confirm the account is as small as you think it is:
+
+```bash
+ssh -i ~/.ssh/monitoring_ed25519 monitor@203.0.113.10 'id; sudo -n -l'
+```
+
+The account should have a locked password (`passwd -S monitor` prints `L`), so that
+`sudo` can never succeed for anything outside the allowlist below.
+
+### 3. Decide what the scripts are allowed to print
+
+Everything a command prints is stored in `check_results.extra`, kept in the database,
+served by the REST API, and — if the analyzer is on — sent to your LLM endpoint. So a
+script's output is not a private channel between two machines; treat it as published.
+
+The trap is a script that shells out to a tool which helpfully dumps an environment.
+`pm2 jlist` is the canonical example: alongside the process states you asked for, it
+prints `pm2_env.env` for every process — the complete set of variables the app was
+started with, which in a normal deployment means database passwords, signing secrets
+and third-party API keys. One line of `exec pm2 jlist` is enough to copy all of them
+into the monitoring database.
+
+Cut it down in the script, on the machine that owns the data:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+PM2_USER=app    # the account that owns the pm2 processes
+
+sudo -u "$PM2_USER" /usr/bin/pm2 jlist |
+    jq -c '[.[] | {
+        name, pm_id,
+        status:       .pm2_env.status,
+        restart_time: .pm2_env.restart_time,
+        memory_mb:    (.monit.memory / 1048576 | floor),
+        cpu:          .monit.cpu
+    }]'
+```
+
+Filtering on the monitoring side instead — a `| jq` appended to the `command:` in
+`monitors.yaml` — reads as equivalent and is not. By then the secrets have crossed the
+network and are in the monitoring process; and `monitors.yaml` is the file an operator
+edits, so the protection lasts exactly until someone simplifies that line. A guarantee
+a config can revoke is not a guarantee.
+
+The same rule covers any script that reads a `.env`, a credentials file or a keyring:
+print the verdict, never the material behind it. Check what a new script actually
+emits before you allowlist it:
+
+```bash
+sudo /usr/local/sbin/monitor-pm2 | grep -iE 'password|secret|token|api_key'
+```
+
+### 4. Let the monitoring user run the scripts
 
 If the scripts need elevated rights, grant exactly those and nothing more — in
 `/etc/sudoers.d/monitoring`:
@@ -656,7 +728,7 @@ ssh -i ~/.ssh/monitoring_ed25519 monitor@203.0.113.10 \
     'sudo /usr/local/sbin/monitor-logs'
 ```
 
-### 4. Declare the check
+### 5. Declare the check
 
 ```yaml
 checks:
@@ -721,7 +793,7 @@ checks:
 
 Start with the thresholds above, then tighten them once you have seen a few real reports.
 
-### 5. Try it without sending anything
+### 6. Try it without sending anything
 
 ```bash
 docker compose exec app php bin/console app:monitor:report --key server_health --dry-run
@@ -729,7 +801,7 @@ docker compose exec app php bin/console app:monitor:report --key server_health -
 
 You should see each section's raw output and the computed overall status.
 
-### 6. Send it for real
+### 7. Send it for real
 
 ```bash
 docker compose exec app php bin/console app:monitor:report --key server_health
