@@ -63,6 +63,7 @@ class ScriptChecker implements CheckerInterface
         $statuses       = [];
         $failedSections = [];
         $findings       = [];
+        $metrics        = [];
         $worstStatus    = Status::OK;
 
         foreach ($commands as $label => $spec) {
@@ -86,7 +87,14 @@ class ScriptChecker implements CheckerInterface
                 $findings[] = sprintf('[%s] %s', $label, $finding['message']);
             }
 
-            $status = $this->parseStatus($text);
+            // Every rule's reading, breach or not, so a report can show the
+            // numbers on a healthy day instead of a bare "OK".
+            foreach ($evaluation['measurements'] ?? [] as $measurement) {
+                $metrics[] = $measurement + ['section' => $label];
+            }
+
+            $status     = $this->parseStatus($text);
+            $selfGraded = $status !== null;
 
             // A script that neither grades itself nor matches a rule is judged
             // by its exit code alone.
@@ -96,7 +104,14 @@ class ScriptChecker implements CheckerInterface
 
             if (!$result->isSuccessful()) {
                 $failedSections[$label] = $result->errorMessage();
-                $status = Status::worse($status, Status::ERROR);
+
+                // A self-grading script already mirrors its verdict in the exit
+                // code — monitor-logs exits 1 for WARN and 2 for CRITICAL — so
+                // folding ERROR in on top of that would report every WARN it
+                // raises as a failed section.
+                if (!$selfGraded) {
+                    $status = Status::worse($status, Status::ERROR);
+                }
             }
 
             $status           = Status::worse($status, $evaluation['status']);
@@ -112,6 +127,7 @@ class ScriptChecker implements CheckerInterface
             'worst_status'    => $worstStatus,
             'statuses'        => $statuses,
             'findings'        => $findings,
+            'metrics'         => $metrics,
             'failed_sections' => $failedSections,
             'target'          => $host ?? 'localhost',
             'output'          => $this->buildReport($sections, $findings),

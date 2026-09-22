@@ -63,6 +63,15 @@ class OutputRuleEvaluatorTest extends TestCase
 
         $this->assertSame('OK', $result['status']);
         $this->assertSame([], $result['findings']);
+
+        // Staying inside the thresholds is still a measurement worth reporting
+        $this->assertSame(
+            [
+                ['name' => 'Disk usage /',         'status' => 'OK', 'value' => '26%'],
+                ['name' => 'Load average (1 min)', 'status' => 'OK', 'value' => '0.27'],
+            ],
+            $result['measurements']
+        );
     }
 
     public function testDiskThresholdIsCrossed(): void
@@ -73,7 +82,11 @@ class OutputRuleEvaluatorTest extends TestCase
 
         $this->assertSame('CRIT', $result['status']);
         $this->assertCount(1, $result['findings']);
-        $this->assertSame('Disk usage /: 96% (above 90%)', $result['findings'][0]['message']);
+        $this->assertSame('Disk usage /: 96% (> 90%)', $result['findings'][0]['message']);
+        $this->assertSame(
+            [['name' => 'Disk usage /', 'status' => 'CRIT', 'value' => '96%']],
+            $result['measurements']
+        );
     }
 
     public function testFractionalLoadIsCompared(): void
@@ -83,7 +96,7 @@ class OutputRuleEvaluatorTest extends TestCase
         $result = $this->evaluator->evaluate([self::LOAD_RULE], $report);
 
         $this->assertSame('WARN', $result['status']);
-        $this->assertSame('Load average (1 min): 5.42 (above 4)', $result['findings'][0]['message']);
+        $this->assertSame('Load average (1 min): 5.42 (> 4)', $result['findings'][0]['message']);
     }
 
     /**
@@ -101,7 +114,7 @@ class OutputRuleEvaluatorTest extends TestCase
         ]], $logs);
 
         $this->assertSame('CRIT', $result['status']);
-        $this->assertSame('Fatal log lines: 12 matching line(s) (above 10)', $result['findings'][0]['message']);
+        $this->assertSame('Fatal log lines: 12 (> 10)', $result['findings'][0]['message']);
     }
 
     public function testCountingModeStaysQuietWithoutMatches(): void
@@ -147,7 +160,7 @@ class OutputRuleEvaluatorTest extends TestCase
         ]], self::SYSTEM_REPORT);
 
         $this->assertSame('WARN', $result['status']);
-        $this->assertStringContainsString('below 10G', $result['findings'][0]['message']);
+        $this->assertStringContainsString('< 10G', $result['findings'][0]['message']);
     }
 
     /**
@@ -191,7 +204,7 @@ class OutputRuleEvaluatorTest extends TestCase
         ]], "nginx.service - A high performance web server\n   Active: failed");
 
         $this->assertSame('CRIT', $result['status']);
-        $this->assertSame('Nginx running: 0 matching line(s) (below 1)', $result['findings'][0]['message']);
+        $this->assertSame('Nginx running: 0 (< 1)', $result['findings'][0]['message']);
     }
 
     public function testCaseIsIgnoredByDefaultAndCanBeEnforced(): void

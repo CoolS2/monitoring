@@ -118,8 +118,9 @@ class ServerReportCommand extends Command
         $llmResult = $this->llmAnalyzer->analyze($key, $type, $outcome->message, $report);
 
         $findings = is_array($outcome->extra['findings'] ?? null) ? $outcome->extra['findings'] : [];
+        $metrics  = is_array($outcome->extra['metrics'] ?? null) ? $outcome->extra['metrics'] : [];
 
-        $this->notifier->sendServerReport($key, $worstStatus, $statuses, $findings, $llmResult);
+        $this->notifier->sendServerReport($key, $worstStatus, $statuses, $findings, $metrics, $llmResult);
 
         $this->entityManager->persist(new Notification(
             $key,

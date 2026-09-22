@@ -224,7 +224,11 @@ class TelegramNotifierTest extends TestCase
             'server_health',
             'WARN',
             ['LOGS' => 'WARN', 'SYSTEM' => 'OK'],
-            ['[SYSTEM] Disk usage /: 96% (above 90%)'],
+            ['[SYSTEM] Disk usage /: 96% (> 90%)'],
+            [
+                ['section' => 'SYSTEM', 'name' => 'Disk usage /', 'status' => 'CRIT', 'value' => '96%'],
+                ['section' => 'SYSTEM', 'name' => 'Uptime',       'status' => 'OK',   'value' => '77 d'],
+            ],
             [
                 'summary'         => '1037 PHP warnings in the last hour',
                 'probable_cause'  => 'A WordPress plugin casts WP_Post to int',
@@ -233,12 +237,73 @@ class TelegramNotifierTest extends TestCase
             ]
         );
 
-        $this->assertStringContainsString('Server Report: server_health', $sentText);
-        $this->assertStringContainsString('<code>LOGS</code>', $sentText);
+        $this->assertStringContainsString('server_health', $sentText);
+        $this->assertStringContainsString('<b>LOGS</b>', $sentText);
         $this->assertStringContainsString('1037 PHP warnings', $sentText);
         $this->assertStringContainsString('• Patch the plugin', $sentText);
-        $this->assertStringContainsString('Detected issues:', $sentText);
-        $this->assertStringContainsString('Disk usage /: 96% (above 90%)', $sentText);
+        $this->assertStringContainsString('Disk usage /: 96% (&gt; 90%)', $sentText);
+
+        // A healthy rule still prints its reading — that is the point of the digest
+        $this->assertStringContainsString('Uptime: <b>77 d</b>', $sentText);
+        $this->assertStringContainsString('Disk usage /: <b>96%</b>', $sentText);
+    }
+
+    public function testDailySummaryListsAvailabilityPerCheck(): void
+    {
+        $sentText = null;
+
+        $mockResponse = $this->createMock(ResponseInterface::class);
+        $mockResponse->method('getStatusCode')->willReturn(200);
+
+        $mockClient = $this->createMock(HttpClientInterface::class);
+        $mockClient->method('request')
+            ->willReturnCallback(function ($method, $url, $options) use ($mockResponse, &$sentText) {
+                $sentText = $options['json']['text'];
+                return $mockResponse;
+            });
+
+        $notifier = new TelegramNotifier(
+            $mockClient,
+            new TelegramConfig('test_token', '1'),
+            $this->createMock(LoggerInterface::class)
+        );
+
+        $notifier->sendDailySummary([
+            'total_runs'   => 312,
+            'success_runs' => 311,
+            'failed_runs'  => 1,
+            'success_rate' => 100,
+            'failed_keys'  => ['my_site' => 1],
+            'checks'       => [
+                [
+                    'key'      => 'my_site',
+                    'total'    => 288,
+                    'ok'       => 287,
+                    'failed'   => 1,
+                    'uptime'   => 99.7,
+                    'avg_time' => 0.34,
+                    'max_time' => 1.12,
+                ],
+                [
+                    'key'      => 'server_health',
+                    'total'    => 24,
+                    'ok'       => 24,
+                    'failed'   => 0,
+                    'uptime'   => 100.0,
+                    'avg_time' => null,
+                    'max_time' => null,
+                ],
+            ],
+        ]);
+
+        $this->assertStringContainsString('99.7%', $sentText);
+        $this->assertStringContainsString('(287 из 288)', $sentText);
+        $this->assertStringContainsString('сред. 0.34 с', $sentText);
+        $this->assertStringContainsString('макс. 1.12 с', $sentText);
+
+        // 100.0 must not render as "100.0%"; a check without timings prints none
+        $this->assertStringContainsString('<b>100%</b> (24 из 24)', $sentText);
+        $this->assertStringNotContainsString('сред. 0 с', $sentText);
     }
 
     /**
