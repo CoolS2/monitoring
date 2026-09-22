@@ -4,9 +4,18 @@ services:
     container_name: monitoring_app
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # Localhost only. The REST API has no authentication and echoes back what
+      # the checks stored — including whatever a diagnostic script printed. Put
+      # it behind an SSH tunnel (`ssh -L 8000:127.0.0.1:8000`) or a reverse
+      # proxy that authenticates, never straight onto 0.0.0.0.
+      - "127.0.0.1:8000:8000"
     environment:
       APP_ENV: prod
+      # Decides when SERVER_REPORT_SCHEDULE and DAILY_SUMMARY_SCHEDULE actually
+      # fire, and how timestamps read in Telegram. Without it the container runs
+      # in UTC and a digest written as 20:00 arrives at whatever 20:00 UTC is
+      # where you live — and shifts again at every DST change.
+      TZ: ${TZ:-UTC}
     env_file:
       # .env is committed and holds placeholders only.
       # Put your real tokens in .env.local, which is git-ignored.
@@ -16,6 +25,10 @@ services:
     volumes:
       - ./var:/app/var                                                  # SQLite database & rotating logs
       - ./config/monitors.yaml:/app/config/monitors.yaml:ro            # Read-only checks config
-      - ${SSH_PRIVATE_KEY_PATH:-/root/.ssh/id_rsa}:/root/.ssh/id_rsa:ro # Read-only SSH private key
+      # A key dedicated to monitoring, authorised for an unprivileged account
+      # whose sudoers allowlist names the diagnostic scripts and nothing else.
+      # Never a personal key with root access: this file is the whole reach of
+      # the service, and a check's command line is only config.
+      - ${SSH_PRIVATE_KEY_PATH:-./secrets/monitoring_ed25519}:/root/.ssh/id_rsa:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"                             # Allows connecting to host-bound LLM

@@ -17,20 +17,27 @@ checks:
   server_health:
     type: script
     host: "YOUR_SERVER_IP"
-    user: root
+    # An unprivileged account whose sudoers allowlist names these scripts and
+    # nothing else — see the walkthrough in the README. Connecting as root
+    # instead would make every command line below a matter of trust rather
+    # than of permission.
+    user: monitor
     interval: 3600        # collect once an hour (monitor-logs looks 1h back)
     timeout: 60           # per-command timeout in seconds
-    fail_on: [WARN, CRIT] # statuses that turn the check into an alert
+    # Only a genuine emergency interrupts. WARN is collected and shown in the
+    # scheduled digest instead — a check that fails around the clock trains you
+    # to swipe the notification away, which is the one outcome worth avoiding.
+    fail_on: [CRIT]
     commands:
 
       # This script grades itself with a "STATUS: OK|WARN|CRIT" line,
       # so it needs no rules.
-      LOGS: "sudo -u monitor sudo /usr/local/sbin/monitor-logs"
+      LOGS: "sudo /usr/local/sbin/monitor-logs"
 
       # These print plain data and never announce a status. Rules measure a
       # number in the output and compare it against thresholds.
       SYSTEM:
-        command: "sudo -u monitor sudo /usr/local/sbin/monitor-system"
+        command: "sudo /usr/local/sbin/monitor-system"
         rules:
           # "/dev/sda1  97G  25G  73G  26% /"  ->  26
           - name: "Disk usage /"
@@ -48,25 +55,59 @@ checks:
       # A raw log tail: only the last lines are kept in the report, but the
       # rules below still see the complete output.
       PM2_LOGS:
-        command: "sudo -u monitor sudo /usr/local/sbin/monitor-pm2-logs"
+        command: "sudo /usr/local/sbin/monitor-pm2-logs"
         max_lines: 40
         rules:
-          # Tune this pattern to your application. Broad words like "error"
-          # also match harmless stack-trace noise such as `createError`.
-          - name: "Fatal log lines"
-            match: 'FATAL|ECONNREFUSED|UnhandledPromiseRejection|out of memory|heap out'
+          # Tune this pattern to your application, and check what it matches
+          # today before trusting it: the word FATAL used to be in this list
+          # and had to come out. Some frameworks tag an ordinary 404 as
+          # `[fatal]` in their request log, and the check then failed every hour
+          # of every day over other people's broken links. Broad words like
+          # "error" match harmless stack-trace noise such as `createError` for
+          # the same reason.
+          - name: "Crash lines in application log"
+            match: 'ECONNREFUSED|UnhandledPromiseRejection|out of memory|heap out of memory|EADDRINUSE'
+            value: count
             warn_above: 0
             crit_above: 10
 
+      # `pm2 jlist` prints `pm2_env.env` — every variable the process was
+      # started with, which on a typical deployment means database passwords,
+      # signing secrets and third-party API keys. Whatever a command prints is
+      # stored in `check_results.extra` and served by the REST API, so a script
+      # that dumps an environment turns the monitoring database into a copy of
+      # your secrets.
+      #
+      # Filter it in the script on the server, not here: this file is the part
+      # an operator edits, and a guarantee that a config can revoke is not one.
+      # `/usr/local/sbin/monitor-pm2` should end with something like
+      #
+      #   sudo -u "$PM2_USER" pm2 jlist | jq -c '[.[] | {name, pm_id,
+      #       status: .pm2_env.status, restart_time: .pm2_env.restart_time,
+      #       memory_mb: (.monit.memory / 1048576 | floor), cpu: .monit.cpu}]'
+      #
+      # The same applies to any script that reads a config file or an
+      # environment: print the verdict, never the material it was based on.
       PM2:
-        command: "sudo -u monitor sudo /usr/local/sbin/monitor-pm2"
+        command: "sudo /usr/local/sbin/monitor-pm2"
         rules:
+          - name: "Processes online"
+            match: '"status":"online"'
+            value: count
+            crit_below: 1
+
           - name: "Processes not online"
-            match: '\b(errored|stopped|stopping|launching)\b'
-            warn_above: 0
+            match: '"status":"(?!online)'
+            value: count
+            crit_above: 0
+
+          - name: "Restarts (worst process)"
+            match: '"restart_time":(\d+)'
+            warn_above: 5
+            crit_above: 20
 
       SERVICES:
-        command: "sudo -u monitor sudo /usr/local/sbin/monitor-services"
+        command: "sudo /usr/local/sbin/monitor-services"
         rules:
           - name: "Services down"
             match: 'NOT RUNNING|inactive|failed'
@@ -74,7 +115,7 @@ checks:
             crit_above: 2
 
       NGINX:
-        command: "sudo -u monitor sudo /usr/local/sbin/monitor-nginx"
+        command: "sudo /usr/local/sbin/monitor-nginx"
         rules:
           - name: "Nginx problems"
             match: 'NOT RUNNING|test failed|emerg'
@@ -94,10 +135,17 @@ checks:
 
   # Nginx error log check — multiple hosts and files in a single check entry.
   # All targets are checked; the check fails if any grep matches are found.
+  #
+  # Because *any* match fails the check, the pattern has to describe an outage,
+  # not a log level. `error|crit` looks reasonable and is not: nginx logs every
+  # 404 and every PHP notice at `[error]`, so on a normal site this check fails
+  # continuously and reduces itself to a message you learn to ignore. Match the
+  # handful of lines that mean the site is actually broken, and leave counting
+  # the rest to the digest.
   nginx_errors:
     type: ssh_log
-    user: root           # default user for all targets (can be overridden per-target)
-    grep: "error|crit"
+    user: monitor        # default user for all targets (can be overridden per-target)
+    grep: 'emerg|\[alert\]|upstream timed out|no live upstreams|SSL_do_handshake\(\) failed'
     lines: 200
     interval: 300
     targets:
@@ -111,7 +159,7 @@ checks:
   # nginx_errors_single:
   #   type: ssh_log
   #   host: "YOUR_VPS_IP"
-  #   user: root
+  #   user: monitor
   #   file: /var/log/nginx/error.log
   #   grep: "error|crit"
   #   interval: 300
@@ -127,6 +175,6 @@ checks:
   # docker_check:
   #   type: docker
   #   host: "YOUR_VPS_IP"
-  #   user: root
+  #   user: monitor
   #   max_restarts: 3
   #   interval: 120
